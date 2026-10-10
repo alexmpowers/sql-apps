@@ -13,3 +13,4 @@ sql/obj/
 examples/**/obj/
 examples/**/bin/
 /docs/superpowers/
+/.worktrees/
