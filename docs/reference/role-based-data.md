@@ -40,9 +40,11 @@ npm run local -- role-based-app
 
 An optional second argument selects an explicitly approved existing SQL container. Startup runs SQL, schema publishing and DAB, then checks the actual readiness procedure before listening on the loopback gateway. It does not start Azurite or Functions or run foundation file/job acceptance. Port ownership checks include only selected services. It preserves data and reports the failed stage rather than resetting volumes.
 
-Development Alice is clearly labeled a simulated user with the required role; Development Bob is a simulated user without it. Sessions are server-issued; caller role/principal headers cannot grant access. The gateway forwards the configured DAB role only for verified authorized sessions. This proves local routing, not real Entra assignment.
+After readiness passes, open the reported workspace origin and select **Open local preview**. Product screens use account/access states, not persona selectors. The server chooses the default simulated identity. For authorization testing, open the reported local-only developer page in the same tab; Development Alice is labeled as having the required role and Development Bob as lacking it. Switch there and return to the application; switching revokes the old server-issued session.
 
-Open only the responding workspace origin after readiness passes. Verify an agreed browser action, SQL persistence/reload, invalid input and applicable owner rules, plus Bob's denial. These are separate from startup readiness. Ctrl+C stops the gateway; SQL/DAB data remain. Resume with:
+Caller role/principal headers cannot grant access. The gateway forwards the configured DAB role only for a verified authorized preview session or opt-in delegated Entra token. Local DAB remains trusted-gateway claim simulation in either mode; local real sign-in does not prove cloud DAB identity or Entra role assignment in the deployed environment. Read [Authentication and application access](authentication.md) for the explicit local Entra opt-in and its no-fallback boundary.
+
+Verify an agreed browser action, SQL persistence/reload, invalid input and applicable owner rules, plus denial for an identity without the required role. A verified non-role account receives HTTP 200 identity/access information from `/auth/me`, a clear access-denied state with sign-out still available, and HTTP 403 on domain operations before DAB is called. Denial must not erase the account or invite a product persona choice. These checks are separate from startup readiness. Ctrl+C stops the gateway; SQL/DAB data remain. Resume with:
 
 ```powershell
 npm run local -- role-based-serve
@@ -72,7 +74,7 @@ After explicit approval for each relevant cloud-write scope:
 npm run azure -- identity azure-role-based.json
 ```
 
-This creates a new single-tenant registration/service principal with delegated `access_as_user` and the configured human application role (allowed member type `User`), not `Function.Invoke`. Set `apiClientId` to its printed identifier. Existing registrations need an enabled equivalent application role; creation does not patch unrelated registrations.
+This creates a new single-tenant registration/service principal with delegated `access_as_user` and the configured human application role (allowed member type `User`), not `Function.Invoke`. A configuration from `npm run azure -- init ... --profile role-based-data` receives the printed identifier automatically, and `deploy-all` runs identity, artifacts, provision, deploy and status as one reviewed approval ([deployment reference](deployment.md#shortest-path)); otherwise set `apiClientId` to its printed identifier. Existing registrations need an enabled equivalent application role; creation does not patch unrelated registrations.
 
 Assign only approved authorized users/groups by object ID:
 
@@ -93,7 +95,7 @@ npm run azure -- deploy azure-role-based.json
 npm run azure -- status azure-role-based.json
 ```
 
-`validate` is offline. `artifacts` builds/publishes exactly gateway and DAB images from this checkout and saves digests only after both succeed. `plan` uses Azure/Graph reads and ARM what-if; obtain separate authorization. `provision`/`deploy` create paid resources. ACR must already exist at the explicitly selected target; creating it is a separate approved operation.
+`validate` is offline. For this profile it also requires `requiredRole` and `readinessPath` to match `role-based-data.json` when present, and every DAB procedure to be declared under `sql/`, so a mismatch fails before images are published. `artifacts` builds/publishes exactly gateway and DAB images from this checkout and saves digests only after both succeed. `plan` uses Azure/Graph reads and ARM what-if; obtain separate authorization. `provision`/`deploy` create paid resources. ACR must already exist at the explicitly selected target; creating it is a separate approved operation.
 
 SQL remains Entra-only with its public endpoint disabled. The deployment operator needs private runner connectivity and database publishing authorization. The template retains SQL private endpoint/DNS but excludes Functions, storage, Key Vault, their identities/grants/endpoints and the Functions subnet. Schema publishing is non-destructive and grants the DAB managed identity only approved procedure permissions.
 
@@ -107,6 +109,6 @@ In a trusted process, set `SQL_APPS_USER_TOKEN` to an authorized delegated API t
 npm run azure -- role-based-smoke azure-role-based.json
 ```
 
-This checks real authorized procedure execution, denial for valid users without the required role and anonymous denial, including caller-forged role headers. It does not create domain records. Then verify real browser sign-in, the agreed order/record save and reload, owner rules, validation and persistence in Azure. Report implemented, built, running and workflow-verified separately; retain actual commands/results and outstanding acceptance gaps.
+This checks real authorized procedure execution, denial for valid users without the required role and anonymous denial, including caller-forged role headers. It does not create domain records. Then verify real browser sign-in, the agreed order/record save and reload, owner rules, validation and persistence in Azure. Use the validation skill to retain actual commands, results and outstanding acceptance gaps.
 
 Compiled templates, mocked Azure calls and local simulation do not prove live Entra, private-network SQL, image startup or domain workflows. No live deployment is implicit in implementation or documentation updates.

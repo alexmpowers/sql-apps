@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { run } from '../src/process.js';
-import { roleBasedProfileSchema, validateRoleBasedDab } from '../src/role-based-profile.js';
+import { parseRoleBasedProfile, roleBasedProfileSchema, validateRoleBasedDab } from '../src/role-based-profile.js';
 import { deploymentSchema, loadRuntimeConfig } from '../src/config.js';
 import { userFromClaims } from '../src/auth.js';
 import { createLocalApp, developmentUsers, localAppOrigin } from '../src/local-app.js';
@@ -25,6 +25,20 @@ test('role-based-data uses generic requiredRole configuration', () => {
   });
   assert.equal('requiredRole' in runtime && runtime.requiredRole, 'AppUser');
 });
+test('cloud runtime rejects insecure or credential-bearing upstream URLs', () => {
+  const environment = {
+    SQL_APPS_PROFILE: 'role-based-data', SQL_APPS_REQUIRED_ROLE: 'AppUser',
+    SQL_APPS_READINESS_PATH: '/api/AppReady',
+    AZURE_TENANT_ID: developmentUsers[0]!.id, API_CLIENT_ID: developmentUsers[0]!.id,
+    DAB_URL: 'https://data.internal',
+  };
+  for (const changed of [
+    { DAB_URL: 'http://data.internal' },
+    { DAB_URL: 'https://user:password@data.internal' },
+    { FUNCTIONS_URL: 'http://functions.internal' },
+    { FUNCTIONS_URL: 'https://user:password@functions.internal' },
+  ]) assert.throws(() => loadRuntimeConfig({ ...environment, ...changed }), /HTTPS|credentials/);
+});
 test('role-based local commands require their profile before starting any services', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'sql-apps-role-based-cli-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -37,7 +51,9 @@ test('role-based local commands require their profile before starting any servic
 });
 test('role-based-data validates dedicated roles and procedure-only DAB permissions', () => {
   assert.deepEqual(roleBasedProfileSchema.parse(profile), profile);
-  assert.throws(() => roleBasedProfileSchema.parse({ ...profile, requiredRole: 'authenticated' }));
+  for (const reservedRole of ['authenticated', 'Anonymous', 'AUTHENTICATED', 'FUNCTION.INVOKE', 'Processor']) {
+    assert.throws(() => roleBasedProfileSchema.parse({ ...profile, requiredRole: reservedRole }));
+  }
   const dab = { entities: { AppReady: {
     source: { type: 'stored-procedure', object: 'dbo.AppReady' }, rest: { enabled: true, methods: ['get'] },
     permissions: [{ role: 'AppUser', actions: ['execute'] }],
@@ -49,6 +65,12 @@ test('role-based-data validates dedicated roles and procedure-only DAB permissio
   assert.throws(() => validateRoleBasedDab({ entities: { AppReady: { ...dab.entities.AppReady,
     rest: true } } }, profile), /readiness/);
   assert.throws(() => validateRoleBasedDab({ ...dab, autoentities: { enabled: true } }, profile));
+  const foundation = { entities: { FileJob: { source: { type: 'table', object: 'dbo.FileJobs' }, rest: true,
+    permissions: [{ role: 'processor', actions: ['read'] }] } } };
+  assert.throws(() => validateRoleBasedDab(foundation, profile), (error: Error) =>
+    /FileJob/.test(error.message) && /stored-procedure/.test(error.message) && !error.message.includes('"code"'));
+  assert.throws(() => parseRoleBasedProfile({ ...profile, requiredRole: 'anonymous' }), (error: Error) =>
+    /requiredRole/.test(error.message) && !error.message.includes('"code"'));
   assert.match(roleBasedProcedureGrants(dab, profile, 'authorized_user'),
     /GRANT EXECUTE ON OBJECT::\[dbo\]\.\[AppReady\].*;\nGRANT VIEW DEFINITION/);
 });
@@ -136,4 +158,65 @@ test('authorized local readiness exposes actual procedure failures', async t => 
   const app = await createLocalApp(async () => new Response('{}', { status: 403 }), undefined, profile);
   t.after(() => app.close());
   assert.equal((await app.inject({ url: '/health/ready', headers: { host: new URL(localAppOrigin).host } })).statusCode, 503);
+});
+
+test('role-based initial readiness uses only the configured authorized procedure', async t => {
+  const { waitForLocalReadiness } = await import('../src/local-app.js');
+  let queries = 0;
+  const app = await createLocalApp(async (url, options) => {
+    queries++;
+    assert.equal(new URL(String(url)).pathname, profile.readinessPath);
+    assert.equal(new Headers(options?.headers).get('x-ms-api-role'), profile.requiredRole);
+    return Response.json({ value: [] });
+  }, undefined, profile);
+  t.after(() => app.close());
+  await waitForLocalReadiness(app, async () => { assert.fail('ready procedure must not retry'); });
+  assert.equal(queries, 1);
+});
+
+test('role-based current-user access does not authorize denied users for domain routes', async t => {
+  const tid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  let upstream = 0;
+  const unavailable = async (): Promise<never> => { throw new Error('Excluded adapter used'); };
+  const app = await createGateway(loadRuntimeConfig({
+    SQL_APPS_PROFILE: profile.profile, SQL_APPS_REQUIRED_ROLE: profile.requiredRole,
+    SQL_APPS_READINESS_PATH: profile.readinessPath, AZURE_TENANT_ID: tid, API_CLIENT_ID: tid,
+    DAB_URL: 'https://data.internal',
+  }), {
+    verifyUser: async token => {
+      if (!['allowed', 'denied'].includes(token)) throw new Error('Invalid test token');
+      return { oid: developmentUsers[0]!.id, tenantId: tid,
+        roles: token === 'allowed' ? [profile.requiredRole] : [] };
+    },
+    files: { put: unavailable, get: unavailable, delete: unavailable }, functionToken: unavailable,
+    fetch: async () => { upstream++; return Response.json({ value: [] }); },
+  });
+  t.after(() => app.close());
+  for (const token of ['denied', 'allowed']) {
+    const response = await app.inject({ url: '/auth/me', headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    assert.deepEqual(response.json(), {
+      oid: developmentUsers[0]!.id, tenantId: tid,
+      roles: token === 'allowed' ? [profile.requiredRole] : [],
+      access: token === 'allowed' ? { allowed: true } : { allowed: false, requiredRole: profile.requiredRole },
+    });
+  }
+  const headers = { authorization: 'Bearer denied',
+    'x-ms-api-role': profile.requiredRole, 'x-ms-client-principal': 'forged' };
+  for (const request of [
+    { method: 'GET', url: '/api/AppReady' },
+    { method: 'POST', url: '/graphql', payload: {} },
+  ] as const) {
+    const response = await app.inject({ ...request, headers });
+    assert.equal(response.statusCode, 403);
+    assert.deepEqual(response.json(), { error: 'Authorized role required' });
+    assert.equal(response.headers['cache-control'], 'no-store');
+  }
+  for (const headers of [{}, { authorization: 'Bearer invalid' }]) {
+    const response = await app.inject({ url: '/auth/me', headers });
+    assert.equal(response.statusCode, 401);
+    assert.equal(response.headers['cache-control'], 'no-store');
+  }
+  assert.equal(upstream, 0);
 });

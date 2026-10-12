@@ -1,42 +1,33 @@
 ---
 name: sql-apps-getting-started
-description: Guide beginners through describing, running and changing a standalone SQL Apps application locally, with optional separately approved Azure sharing.
+description: Guide a beginner from an app idea to one verified local SQL Apps workflow, then route optional design, validation or sharing work to the matching skill.
 ---
 
 # SQL Apps
 
-SQL Apps is a standalone project with its own runtime and workflow. Use only SQL Apps skills and project-owned commands for SQL Apps work. Do not disable or modify other installed plugins.
-Confirm the intended SQL Apps application directory before edits. Do not infer a directory from another plugin, session title or conversation history. If the active project is unrelated or the target is unclear, ask which directory to use; do not convert or overwrite it.
+Confirm the absolute SQL Apps application checkout before edits. Use its project-owned commands and leave other plugins unchanged.
 
-Work in the intended application checkout. Follow **Describe -> Run locally -> Make it yours -> Share optionally**. Read `README.md`, `docs/guides/build-your-app.md` and `docs/guides/getting-started.md`. SQL experience is welcome, not required.
+Follow **Describe -> Run locally -> Make it yours -> Share optionally**.
 
-Ask one outcome-focused question at a time about users, information and actions. Check setup/private-preview access early. Summarize the small agreed scope before edits; do not require framework or Azure-service choices. Select only needed capabilities using supported existing paths; a saved capability list is not a dynamic launcher.
+## Describe
 
-Once Node exists, run `npm run guide` and `node scripts/setup-check.mjs` before restore/build. Explain one actionable blocker, expected result and safe resume. Ask before installations, downloads, EULA acceptance, workspace/schema changes or startup; saving a brief is not consent.
+Read `README.md`, then open only the guide needed for the current stage. Ask one outcome-focused question at a time about users, information and actions. Summarize the smallest useful scope, selected capabilities and one first improvement. Do not ask beginners to choose frameworks, Azure services or deployment topology.
 
-Use the existing application/local skills and clean application boundary. Verify a real browser action and SQL save/reload, then make and verify one useful change. Save only agreed decisions and exact evidence through `npm run guide -- --save <brief-path>`. Historical reports are not live acceptance; source changes require local re-verification. Keep secrets and actual records out of the brief.
+Run `npm run guide` to recover saved decisions. Saved evidence is historical, not current readiness or permission.
 
-Do not scaffold another runtime or install unverified platform packages. This project owns its configuration and runtime contracts; no external platform source is a prerequisite.
+## Route the work
 
-## Validation
+- Use `sql-apps-application` for screens, SQL behavior, access rules and the first useful change.
+- Use `sql-apps-local` for prerequisites, approval, startup, resume and stop.
+- Use `sql-apps-validation` for tests and live workflow checks.
+- Use `sql-apps-design` for a substantial visual direction or redesign.
+- Use `sql-apps-diagnostics` for an existing failure.
+- Use `sql-apps-cloud-preview` only after the user asks to share.
 
-- `npm ci`
-- `npm test`
-- `npm run typecheck`
-- `npm run sql:tools`
-- `npm run sql:build`
-- `npm run infra:build`
-- `npm run dab:validate`
+Do not preload those skills or their references. Load the next stage only, and stop gathering context once its command or blocker is known.
 
-Use `npm run azure -- help` for the implemented command surface. Run `npm run build` after editing TypeScript.
+## Finish locally
 
-## Deployment
+Verify a real browser action and SQL save/reload with synthetic data. Then implement and verify one useful change without breaking the original workflow. Use `sql-apps-validation` for current evidence and reporting.
 
-Local success is enough. Discuss deployment only when sharing is requested. Public anonymous demos require synthetic data; read `docs/reference/demo-deployment.md` and disclose its unfinished deployment path. Real-data authenticated applications need the separate full deployment review. Do not silently substitute profiles.
-
-Follow the canonical policy in `docs/reference/demo-cost.md` and run offline `demo-cost` before Azure requests. Lead with free tier, not a free-deployment promise. Preserve `free-paused`/`AutoPause`; never enable paid continuation or fallback without explicit approval. Saved preferences do not authorize spending.
-
-Read `docs/reference/deployment.md` and `docs/maintainers/operations.md` before changing deployment behavior.
-Use Azure CLI and Bicep directly through the project orchestration. Review the configured subscription, resource group, identities, images, costs, and what-if before mutation. SQL publishing requires a privately connected runner with the SQL administrator identity.
-
-Never report cloud success from compilation or mocked tests. Validate live sign-in, two-user row/file isolation, function identity, and repeat deployment. Keep secrets out of client configuration and logs.
+Keep secrets and real records out of saved briefs. A useful local app is success; Azure remains optional.

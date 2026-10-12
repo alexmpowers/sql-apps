@@ -14,9 +14,13 @@ When adding capabilities, consider their future costs without choosing cloud inf
 
 Azure SQL and Container Apps have free allowances, but the current demo templates also use a paid container registry and managed networking. Scaling the app to zero does not remove those charges. The authenticated deployment uses additional paid services.
 
+The Static Web Apps candidate does not remove that stack. Static Web Apps Standard serves the static website, while one linked Container App still runs the Node API and internal DAB. ACR, networking, SQL and Container Apps can still charge, and Standard adds its own plan. It is therefore likely not cheaper and must not be presented as a cost-saving default without current, same-basis evidence.
+
 If zero Azure spending is a requirement, stay local until you have reviewed a hosting design that meets it. SQL Apps does not currently provide a guaranteed zero-cost deployment.
 
 Before creating resources, select the approved capability/access profile, then review the target region, subscription eligibility, fixed charges, expected usage and cleanup plan. The [offline demo cost command](../reference/demo-cost.md) identifies known demo charges without contacting Azure; it is demo-only, not an authenticated app cost model, price quote or spending cap. Role-authorized data-only apps use the matching [role-based-cost review](../reference/role-based-data.md#profile-specific-azure-preparation); do not price an older stack or substitute the full foundation as though it were the agreed app.
+
+For the hosting candidate, populate `azure-demo-hosting-comparison.json` with dated regional/account pricing and measured usage, then run `npm run azure -- hosting-compare azure-demo-hosting-comparison.json`. Use the same region, currency, request count, transfer and active-backend hours for both choices. Container Apps remains recommended if Static Web Apps costs more or live acceptance has not passed; no command changes the default automatically.
 
 ## What happens when an allowance runs out?
 

@@ -128,20 +128,25 @@ export async function readGuide(home = defaultHome) {
   const state = await readState(source.home);
   const changed = state !== null && state.sourceFingerprint !== source.fingerprint;
   const checkpoint = state?.brief.checkpoint;
+  const profile = await lstat(join(source.home, 'role-based-data.json')).then(() => 'role-based-data', () => null);
+  const agreed = state?.brief.capabilities;
+  const suggestedProfile = profile ?? (!agreed ? null :
+    agreed.includes('files') || agreed.includes('background-jobs') ? 'foundation' : 'role-based-data');
+  const setupPlan = `setup plan --profile ${suggestedProfile ?? '<foundation|role-based-data>'} (node scripts/setup.mjs plan)`;
   const nextStage = !state ? 'describe' : changed ? 'run-locally' :
     checkpoint?.stage === 'make-it-yours' ? 'share-optionally' :
       checkpoint?.stage === 'run-locally' ? 'make-it-yours' : 'run-locally';
   const nextActions = {
     describe: 'Describe who the app helps, its information and actions. Agree on a small scope before edits; use docs/guides/build-your-app.md.',
-    'run-locally': changed ?
-      'Source changed since the saved report. With approval, rebuild and verify the actual app locally; do not trust an old checkpoint.' :
-      'Run node scripts/setup-check.mjs first. Review each required action and obtain approval before installations, downloads, workspace selection or schema/startup changes.',
+    'run-locally': changed && checkpoint ?
+      `Source changed since the saved checkpoint, so its evidence is historical. Run ${setupPlan} to rebuild with approval, then verify the actual app locally again.` :
+      `Run ${setupPlan} first. It orders setup checks and names each approval before installations, downloads, workspace selection or schema/startup changes.`,
     'make-it-yours': 'Recheck the intended running app, then make the saved nextChange. Verify browser validation, SQL save/reload and existing behavior before recording evidence.',
     'share-optionally': 'You can stop here with a useful local app. Sharing requires separate data/access review and explicit cloud approval; a saved checkpoint never authorizes deployment.',
   };
   const capabilities = state?.brief.capabilities ?? ['data'];
   return {
-    home: source.home, application: source.application, brief: state?.brief ?? null,
+    home: source.home, application: source.application, profile, suggestedProfile, brief: state?.brief ?? null,
     stages, nextStage, nextAction: nextActions[nextStage],
     progress: { status: changed ? 'source-changed' : checkpoint ? 'reported-not-reverified' : 'not-verified',
       savedAt: state?.savedAt ?? null, checkpoint: checkpoint ?? null },
@@ -158,9 +163,10 @@ export async function readGuide(home = defaultHome) {
       phase: nextStage === 'share-optionally' ? 'deployment-cost-review' :
         nextStage === 'make-it-yours' ? 'capability-cost-awareness' : 'local-cost-awareness',
       message: nextStage === 'share-optionally' ?
-        'Before sharing, run the offline demo-cost review. Free SQL/compute allowances do not remove registry or managed-network charges. A zero-spend intent is blocked by the current template; never fall back to paid resources.' :
+        `Before sharing, run the offline ${suggestedProfile === 'role-based-data' ? 'role-based-cost' : 'demo-cost'} review. Free SQL/compute allowances do not remove registry or managed-network charges. A zero-spend intent is blocked by the current template; never fall back to paid resources.` :
         'Local operation has no Azure usage bill; tool/access/licensing conditions still apply. Review future costs when adding files/background work, not cloud architecture during initial design.',
-      reviewCommand: 'npm run azure -- demo-cost <explicit-cost-config.json>',
+      reviewCommand: suggestedProfile === 'role-based-data' ? 'npm run azure -- role-based-cost azure-role-based-cost.example.json (copy and edit for your app)' :
+        'npm run azure -- demo-cost <explicit-cost-config.json>',
       usageStatus: 'not-queried',
       spendingAuthorized: false,
       scaleGuidance: 'Review actual remaining allowances, latency and availability needs before paying for capacity. User count is not a scaling threshold. Budgets are alerts, not hard spending caps.',

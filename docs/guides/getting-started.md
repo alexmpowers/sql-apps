@@ -79,7 +79,26 @@ If a usable image is cached, you do not need to download it again just to refres
 
 Startup passes `ACCEPT_EULA=Y`; there is no chat dialog. Review the [container documentation/access instructions](https://aka.ms/azuresqldb-container) and applicable terms supplied with your preview registry access before approving SQL startup under those terms. If those terms are unavailable, pause rather than assume acceptance. This approval does not cover other licenses or later operations.
 
+You do not need to acknowledge an unchanged reviewed document every session. [Remember local permissions](../reference/local-consent.md) explains the separate persisted terms digest and revocable checkout-scoped operation grants. Plan all upcoming effects together, record only explicit approvals, and ask again only for missing/changed scopes or terms. A local terms copy cannot detect remote changes by itself.
+
 ## 5. Choose your next step
+
+Once your app scope is agreed, use the dependency-free [setup coordinator](../reference/setup.md):
+
+```powershell
+node scripts\setup.mjs plan --profile role-based-data --json
+```
+
+Use `role-based-data` only for the configured SQL/DAB/browser domain profile;
+use `foundation` for the agreed file/job foundation. Neither generates screens
+or selects an example. The report separates prerequisites, dependencies,
+current build, workspace, startup permissions and application acceptance.
+`setup plan` installs nothing. Install missing system tools with separate
+`setup install-plan <tool>` reviews. Everything else is one approval:
+`setup approval --profile <profile>` lists restore, build, workspace, startup
+and the SQL terms line; after you approve, `setup approve` records it and
+`setup run` continues. Licenses, preview credentials and required restarts
+remain human steps. See the reference for platform support and verification limits.
 
 - **Build your own app:** follow [Build your app](build-your-app.md).
 - **Try an implemented example:** follow the [Todo reference guide](../../examples/todo/README.md).

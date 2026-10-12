@@ -70,10 +70,23 @@ test('compiled minimal foundation has reviewed SQL sizing, narrow networking and
   assert.doesNotMatch(JSON.stringify(template), /0\.0\.0\.0|listCredentials|Microsoft\.Graph|Microsoft\.Web|Microsoft\.Storage|privateEndpoints/);
 });
 
-test('compiled runtime exposes only HTTPS gateway with internal DAB and one scale-to-zero replica', async t => {
+test('compiled runtime exposes an SWA-linked HTTPS gateway with internal DAB and one scale-to-zero replica', async t => {
   const template = await compile(t, 'demo-runtime');
-  assert.equal(template.resources.length, 1);
-  const app = template.resources[0];
+  assert.equal(template.resources.length, 3);
+  const staticSite = template.resources.find(resource => resource.type === 'Microsoft.Web/staticSites');
+  assert.ok(staticSite);
+  assert.equal(Object.hasOwn(template.parameters.staticWebAppLocation, 'defaultValue'), false);
+  assert.equal(staticSite.location, "[parameters('staticWebAppLocation')]");
+  assert.equal(staticSite.sku.name, 'Standard');
+  assert.equal(staticSite.sku.tier, 'Standard');
+  assert.equal(staticSite.properties.allowConfigFileUpdates, true);
+  assert.equal(staticSite.properties.stagingEnvironmentPolicy, 'Disabled');
+  const linked = template.resources.find(resource => resource.type === 'Microsoft.Web/staticSites/linkedBackends');
+  assert.ok(linked);
+  assert.match(linked.properties.backendResourceId, /Microsoft\.App\/containerApps/);
+  assert.equal(linked.properties.region, "[parameters('location')]");
+  const app = template.resources.find(resource => resource.type === 'Microsoft.App/containerApps');
+  assert.ok(app);
   assert.equal(app.type, 'Microsoft.App/containerApps');
   assert.equal(app.properties.workloadProfileName, 'Consumption');
   assert.equal(app.properties.configuration.ingress.external, true);
@@ -104,6 +117,10 @@ test('compiled runtime exposes only HTTPS gateway with internal DAB and one scal
     assert.ok(JSON.stringify(template.variables.ownedTags).includes(key), `Missing runtime ownership tag ${key}`);
   }
   assert.equal(gateway.env.find(variable => variable.name === 'DAB_URL').value, 'http://127.0.0.1:5000');
+  assert.equal(
+    gateway.env.find(variable => variable.name === 'PUBLIC_ORIGIN').value,
+    "[format('https://{0}', reference(resourceId('Microsoft.Web/staticSites', parameters('staticWebAppName')), '2023-12-01').defaultHostname)]",
+  );
   const connection = data.env.find(variable => variable.name === 'SQL_CONNECTION_STRING').value;
   assert.match(connection, /Active Directory Managed Identity/);
   assert.match(connection, /clientId/);
@@ -113,5 +130,8 @@ test('compiled runtime exposes only HTTPS gateway with internal DAB and one scal
     { name: 'ASPNETCORE_URLS', value: 'http://127.0.0.1:5000' },
   ]);
   assert.ok(gateway.probes.some(probe => probe.type === 'Readiness' && probe.httpGet.path === '/health/ready'));
+  for (const key of ['publicUrl', 'backendUrl', 'staticWebAppName']) {
+    assert.ok(template.outputs[key], `Missing runtime output ${key}`);
+  }
   assert.doesNotMatch(JSON.stringify(template), /passwordSecretRef|Simulator|Microsoft\.Graph|functionsImage/);
 });

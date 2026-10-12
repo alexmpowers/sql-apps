@@ -14,14 +14,18 @@ Use Azure CLI for container revisions, logs, identities, role assignments, and r
 - The command runner waits for process output streams to close before returning, so deployment JSON and error diagnostics are not truncated when the child exits.
 - Infrastructure/schema/runtime stages are persisted locally. Retry repeats declarative stages rather than assuming prior state is current.
 - Schema failure prevents new gateway/data rollout; existing runtime resources are not intentionally deleted.
-- Local lock files are removed on ordinary completion/failure. After an abrupt process termination, verify no deployment is running before removing that environment's exact `.lock` file.
+- Local locks atomically publish a directory containing a unique process/host owner record. Recovery removes only the observed dead owner's record, so concurrent recovery cannot delete a replacement lock. Legacy incomplete files or empty consent locks are recovered after 30 seconds; live owners remain protected regardless of age.
+- `deploy-all` checks the saved deployment fingerprint before skipping completed stages. A changed configuration or role-based SQL/DAB source stops continuation for operator review; a historical ready stage is not proof that a changed release was deployed.
+- Gateway proxies use Fastify's native Web-stream handling for incremental delivery and backpressure. Disconnecting a client cancels the upstream response even while its next chunk is pending; loopback HTTP regressions cover both DAB and Functions proxy paths.
 - ARM changes, SQL publishing, and Graph assignments are not a single transaction. Inspect recorded stages and Azure state after failure.
 - Runtime rollback does not reverse schema changes. Use expand/contract changes and operator-reviewed recovery.
 - Do not run deployment from two unrelated machines simultaneously. CI provides concurrency grouping; a distributed lock service is not implemented.
 
 ## Durable data
 
-SQL owns application data and row-level security. Blob owns user files. Files are addressed by tenant/object-ID/name; deleting the application does not require deleting its data.
+SQL owns application data and row-level security. Blob owns user files. Files are addressed by tenant/object-ID/name; deleting the application does not require deleting its data. The gateway returns at most 100 files per storage response with an opaque continuation token. The browser loads one page initially and follows a token only when the user selects **Load more files**.
+
+An Azure Blob SDK regression uses a loopback HTTP fixture to verify the 100-result page limit, one request per page, opaque continuation and private snapshot-prefix exclusion. It needs no live storage account and is not live Azure acceptance.
 
 The SQL administrator intentionally has privileged schema access. The DAB identity receives only table CRUD, and SQL block/filter predicates protect ownership. Gateway and function identities are separate.
 

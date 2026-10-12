@@ -26,7 +26,8 @@ export interface WorkspaceRuntime {
 }
 export function workspaceFile(root?: string): string;
 export function readWorkspace(root?: string): WorkspaceDescriptor | null;
-export function runtimeFor(container?: string, root?: string): WorkspaceRuntime;
+export function describeWorkspace(root: string, selection: number | 'legacy'): WorkspaceDescriptor;
+export function runtimeFor(container?: string, root?: string, proposed?: WorkspaceDescriptor): WorkspaceRuntime;
 export function functionsImage(runtime?: WorkspaceRuntime): string;
 export function portState(port: number): Promise<PortState>;
 export function proposeWorkspace(root?: string, probe?: (port: number) => Promise<PortState>): Promise<{

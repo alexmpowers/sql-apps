@@ -1,19 +1,23 @@
 {
   "name": "sql-apps",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22 <23 || >=24 <25" },
+  "engines": {
+    "node": ">=22 <23 || >=24 <25"
+  },
   "scripts": {
     "build": "node scripts/build-provenance.mjs",
     "app:check": "node scripts/check-application.mjs",
     "app:build": "node scripts/build-application.mjs",
     "app:check-api": "node scripts/check-application-api.mjs",
     "setup:check": "node scripts/setup-check.mjs",
+    "setup": "node scripts/setup.mjs",
     "guide": "node scripts/guide.mjs",
     "workspace:check": "node scripts/workspace-check.mjs",
+    "consent": "node scripts/local-consent.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && tsc && npm run app:check && node --test dist/tests/*.test.js tests/setup.test.mjs tests/guide.test.mjs tests/workspace.test.mjs tests/workspace-runtime.test.mjs",
+    "test": "npm run build && tsc && npm run app:check && node --test dist/tests/*.test.js tests/setup.test.mjs tests/setup-install.test.mjs tests/setup-journey.test.mjs tests/guide.test.mjs tests/workspace.test.mjs tests/workspace-runtime.test.mjs tests/local-consent.test.mjs && node scripts/test-examples.mjs",
     "start": "node dist/src/server.js",
     "azure": "node dist/src/cli.js",
     "local": "node dist/src/local-cli.js",
@@ -40,10 +44,16 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@azure/static-web-apps-cli": "2.0.10",
     "@types/node": "22.20.4",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
     "esbuild": "0.28.2",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "adm-zip": "0.6.1",
+    "selfsigned": "5.5.0",
+    "tmp": "0.2.7"
   }
 }

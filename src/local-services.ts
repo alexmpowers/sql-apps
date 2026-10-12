@@ -16,6 +16,7 @@ import type { UserIdentity } from './auth.js';
 import { maintainLocalJobs } from './local-maintenance.js';
 import { runtimeFor, functionsImage } from './workspace.mjs';
 import { verifyContainerWorkspace } from './local-ownership.js';
+import { probeReadiness } from './readiness.js';
 
 export const localFunctionsOrigin = runtimeFor().origins.functions;
 const azuriteImage = 'mcr.microsoft.com/azure-storage/azurite:3.35.0@sha256:647c63a91102a9d8e8000aab803436e1fc85fbb285e7ce830a82ee5d6661cf37';
@@ -36,6 +37,41 @@ export function serviceNames(container: string) {
 export function storageConnection(key: string, host = '127.0.0.1') {
   const ports = host === '127.0.0.1' ? runtimeFor().ports : { blob: 10000, queue: 10001 };
   return `DefaultEndpointsProtocol=http;AccountName=${account};AccountKey=${key};BlobEndpoint=http://${host}:${ports.blob}/${account};QueueEndpoint=http://${host}:${ports.queue}/${account};`;
+}
+
+export function localServiceReadiness(connection: string, secret: string) {
+  const options = { retryOptions: { maxTries: 1, tryTimeoutInMs: 4_000 } };
+  const blobs = BlobServiceClient.fromConnectionString(connection, options);
+  const queues = ['file-jobs', 'file-jobs-poison'].map(name => new QueueClient(connection, name, options));
+  const input = {
+    user: { oid: '11111111-1111-4111-8111-111111111111', tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    input: { readiness: true },
+  };
+  const expected = z.strictObject({
+    result: z.strictObject({
+      user: z.strictObject({ oid: z.literal(input.user.oid), tenantId: z.literal(input.user.tenantId) }),
+      input: z.strictObject({ readiness: z.literal(true) }),
+    }),
+  });
+  return async (fetcher: typeof fetch, signal: AbortSignal): Promise<void> => {
+    await Promise.all([
+      probeReadiness('blob', async () => {
+        await Promise.all(['files', 'traces'].map(name =>
+          blobs.getContainerClient(name).getProperties({ abortSignal: signal })));
+      }),
+      probeReadiness('queue', async () => {
+        await Promise.all(queues.map(queue => queue.getProperties({ abortSignal: signal })));
+      }),
+      probeReadiness('functions', async () => {
+        const response = await fetcher(new URL('/api/echo', localFunctionsOrigin), {
+          method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
+          body: JSON.stringify(input), signal, redirect: 'error',
+        });
+        if (response.status !== 200) throw new Error(`Functions readiness returned HTTP ${response.status}`);
+        expected.parse(await response.json());
+      }),
+    ]);
+  };
 }
 
 async function credentials(container: string, create: boolean) {
@@ -136,7 +172,6 @@ export async function startLocalServices(container: string, runner: Run = run): 
     return ip;
   };
   const storageIp = await address(names.storage);
-  const dataIp = await address(names.data);
   if (functionsExist) await runner('docker', ['rm', '--force', names.functions]);
   await runner('docker', ['run', '--detach', '--name', names.functions, '--label', 'sql-apps.local=functions',
     ...runtime.labels,
@@ -146,7 +181,7 @@ export async function startLocalServices(container: string, runner: Run = run): 
     '--env', 'LOCAL_SETTINGS',
     '--env', 'FUNCTIONS_WORKER_RUNTIME=node', '--env', 'SQL_APPS_LOCAL_FUNCTIONS=true', image],
   { env: { AzureWebJobsStorage: storageConnection(state.key, storageIp), LOCAL_FUNCTION_SECRET: state.secret,
-    LOCAL_DAB_URL: `http://${dataIp}:5000`, LOCAL_SETTINGS: JSON.stringify(settings) }, redact: [state.key, state.secret] });
+    LOCAL_DAB_URL: `http://${names.data}:5000`, LOCAL_SETTINGS: JSON.stringify(settings) }, redact: [state.key, state.secret] });
   await runner('docker', ['network', 'connect', names.network, names.functions]);
   for (let attempt = 0; attempt < 120; attempt++) {
     let response: Response | undefined;
@@ -233,7 +268,8 @@ export async function localServiceAdapters(container: string) {
       return deleteLocalJobSnapshot(jobs, snapshots, identity.tenantId, identity.oid, id);
     },
   };
-  return { files, processing, functionToken: async () => state.secret, settings, ...(telemetry ? { telemetry } : {}) };
+  return { files, processing, functionToken: async () => state.secret, settings,
+    ready: localServiceReadiness(connection, state.secret), ...(telemetry ? { telemetry } : {}) };
 }
 
 export async function runLocalMaintenance(container: string) {

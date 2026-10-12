@@ -243,7 +243,7 @@ async function readLocal(container: string): Promise<LocalState> {
 }
 
 export async function publishLocalSchema(container: string, target: {
-  database: string; project: string; output: string; intermediate?: string;
+  database: string; project: string; output: string; intermediate?: string; runPostDeploy?: boolean;
 }, run: Run): Promise<void> {
   stateSchema.shape.container.parse(container);
   z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,127}$/).parse(target.database);
@@ -251,12 +251,24 @@ export async function publishLocalSchema(container: string, target: {
   const adminPassword = environment.find(value => value.startsWith('MSSQL_SA_PASSWORD='))?.slice('MSSQL_SA_PASSWORD='.length);
   if (!adminPassword) throw new Error('Container must expose MSSQL_SA_PASSWORD for local schema publishing; it is never printed or persisted');
   const port = await sqlHostPort(container, run);
-  await run('dotnet', ['tool', 'restore']);
+  const tools = z.object({ tools: z.object({ 'microsoft.sqlpackage': z.object({
+    version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  }) }) }).parse(JSON.parse(await readFile('.config/dotnet-tools.json', 'utf8')));
+  const expected = tools.tools['microsoft.sqlpackage'].version;
+  let verified = false;
+  try {
+    const version = (await run('dotnet', ['tool', 'run', 'sqlpackage', '--', '/Version'])).trim();
+    verified = version === expected || version === `${expected}.0`;
+  } catch {
+    console.error('SqlPackage version probe failed; restoring the approved local tool manifest before schema publication.');
+  }
+  if (!verified) await run('dotnet', ['tool', 'restore']);
   await run('dotnet', ['build', target.project, '--output', target.output,
     ...(target.intermediate ? [`-p:BaseIntermediateOutputPath=${target.intermediate}${target.intermediate.endsWith(sep) ? '' : sep}`] : [])]);
   await run('dotnet', ['tool', 'run', 'sqlpackage', '--', '/Action:Publish', `/SourceFile:${join(target.output, 'database.dacpac')}`,
     `/TargetConnectionString:Server=127.0.0.1,${port};Database=${target.database};User Id=sa;Password="${adminPassword.replaceAll('"', '""')}";Encrypt=True;TrustServerCertificate=True;`,
-    '/p:IgnorePostDeployScript=True', '/p:BlockOnPossibleDataLoss=True', '/p:DropObjectsNotInSource=False'],
+    `/p:IgnorePostDeployScript=${target.runPostDeploy ? 'False' : 'True'}`,
+    '/p:BlockOnPossibleDataLoss=True', '/p:DropObjectsNotInSource=False'],
   { redact: [adminPassword, adminPassword.replaceAll('"', '""')] });
 }
 
@@ -356,6 +368,18 @@ export async function startLocalData(container: string, run: Run, authorized?: R
     '--mount', `type=bind,source=${path},target=/App/dab-config.json,readonly`,
     dabImage],
   { env: { SQL_CONNECTION_STRING: localConnection(state.password, `${network[1].IPAddress},1433`) }, redact: [state.password] });
+  const servicesNetwork = runtime.names.network;
+  const servicesNetworkExists = (await run('docker',
+    ['network', 'ls', '--filter', `name=^${servicesNetwork}$`, '--format', '{{.Name}}'])).trim();
+  if (servicesNetworkExists) {
+    const details = z.object({ Internal: z.literal(true), Labels: z.record(z.string(), z.string()) })
+      .parse(JSON.parse(await run('docker', ['network', 'inspect', '--format', '{{json .}}', servicesNetwork])));
+    if (details.Labels['sql-apps.local'] !== 'services' ||
+        (runtime.mode === 'isolated' && details.Labels['sql-apps.workspace'] !== runtime.id)) {
+      throw new Error('Local worker network is not owned by this workspace; refusing to attach DAB');
+    }
+    await run('docker', ['network', 'connect', servicesNetwork, dataContainer]);
+  }
   for (let attempt = 0; attempt < 30; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('Local DAB health check timed out')), 2_000);

@@ -1,8 +1,267 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLocalApp, developmentUsers, localAppOrigin } from '../src/local-app.js';
+import { createLocalApp, developmentUsers, localAppOrigin, startLocalGateway, waitForLocalReadiness } from '../src/local-app.js';
+import { readFile } from 'node:fs/promises';
+import { runtimeFor } from '../src/workspace.mjs';
+import { localSettingsSchema } from '../src/local-settings.js';
+import { DependencyReadinessError } from '../src/readiness.js';
+import { z } from 'zod';
+import { request } from 'node:http';
+import { generateKeyPair, SignJWT } from 'jose';
 
 const headers = { host: new URL(localAppOrigin).host, origin: localAppOrigin };
+type Services = NonNullable<Parameters<typeof createLocalApp>[1]>;
+const serviceFixture = (ready: Services['ready']): Services => ({
+  files: { put: async () => {}, get: async () => undefined, delete: async () => false },
+  processing: {
+    list: async () => [], create: async () => '11111111-1111-4111-8111-111111111111',
+    delete: async () => false,
+  },
+  functionToken: async () => 'synthetic-test-token',
+  settings: localSettingsSchema.parse({ tracing: false }),
+  ready,
+});
+
+function loopbackGateway(t: TestContext, app: Awaited<ReturnType<typeof createLocalApp>>) {
+  const listen = app.listen.bind(app);
+  const responses: { status: number; body: unknown }[] = [];
+  let origin: string | undefined;
+  t.mock.method(app, 'listen', async (options: unknown) => {
+    assert.deepEqual(options, { host: '127.0.0.1', port: runtimeFor().ports.gateway });
+    origin = await listen({ host: '127.0.0.1', port: 0 });
+    return origin;
+  });
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, options?: RequestInit) => {
+    assert.equal(String(input), new URL('/health/ready', localAppOrigin).href);
+    assert.equal(options?.redirect, 'error');
+    assert.ok(options?.signal);
+    assert.ok(origin);
+    const target = new URL('/health/ready', origin);
+    const signal = options.signal;
+    const response = await new Promise<Response>((done, reject) => {
+      const probe = request(target, {
+        signal, headers: { host: new URL(localAppOrigin).host },
+      }, incoming => {
+        const chunks: Buffer[] = [];
+        incoming.on('data', (chunk: Buffer) => { chunks.push(chunk); });
+        incoming.once('error', reject);
+        incoming.once('end', () => {
+          assert.ok(incoming.statusCode);
+          done(new Response(Buffer.concat(chunks).toString('utf8'), { status: incoming.statusCode }));
+        });
+      });
+      probe.once('error', reject);
+      probe.end();
+    });
+    responses.push({ status: response.status, body: await response.clone().json() });
+    return response;
+  });
+  return responses;
+}
+
+test('foundation readiness requires the configured worker instead of trusting DAB HTTP health', async t => {
+  const app = await createLocalApp(async () => Response.json({ value: [] }),
+    serviceFixture(async () => { throw new DependencyReadinessError('functions', new Error('worker unavailable')); }));
+  t.after(() => app.close());
+  const readiness = await app.inject({ url: '/health/ready', headers });
+  assert.equal(readiness.statusCode, 503);
+  assert.deepEqual(readiness.json(), { status: 'not-ready', dependency: 'functions' });
+  assert.equal((await app.inject({ url: '/health/live', headers })).statusCode, 200);
+});
+
+for (const foundation of [false, true]) {
+  test(`${foundation ? 'foundation' : 'SQL-only'} readiness uses one bounded authorized data read`, async t => {
+    const requests: URL[] = [];
+    let servicesChecked = false;
+    const fetcher: typeof fetch = async (url, options) => {
+      const target = new URL(String(url));
+      requests.push(target);
+      if (target.pathname === '/health') return Response.json({ status: 'Unhealthy' });
+      assert.equal(target.pathname, '/api/FileJob');
+      assert.equal(target.searchParams.get('$first'), '1');
+      assert.equal(options?.redirect, 'error');
+      assert.ok(options?.signal);
+      const forwarded = new Headers(options?.headers);
+      assert.equal(forwarded.get('authorization'), null);
+      assert.equal(forwarded.get('x-ms-api-role'), 'authenticated');
+      const principal = JSON.parse(Buffer.from(forwarded.get('x-ms-client-principal')!, 'base64').toString());
+      assert.equal(principal.claims.find((claim: { typ: string }) => claim.typ === 'oid').val, developmentUsers[0]!.id);
+      return Response.json({ value: [], nextLink: '/api/FileJob?$after=unused' });
+    };
+    const app = await createLocalApp(fetcher, foundation ? serviceFixture(async (usedFetcher, signal) => {
+      assert.equal(usedFetcher, fetcher);
+      assert.equal(signal.aborted, false);
+      servicesChecked = true;
+    }) : undefined);
+    t.after(() => app.close());
+    const response = await app.inject({ url: '/health/ready', headers });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { status: 'ready' });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.pathname, '/api/FileJob');
+    assert.equal(servicesChecked, foundation);
+  });
+}
+
+for (const scenario of [
+  { name: 'authorization failure', response: () => new Response(null, { status: 403 }) },
+  { name: 'data outage', response: () => new Response(null, { status: 503 }) },
+  { name: 'connection refusal', response: (): Response => { throw new Error('synthetic private failure'); } },
+  { name: 'invalid JSON', response: () => new Response('not-json') },
+  { name: 'wrong data shape', response: () => Response.json({ status: 'Healthy' }) },
+  { name: 'oversized page', response: () => Response.json({ value: [
+    { id: developmentUsers[0]!.id }, { id: developmentUsers[1]!.id },
+  ] }) },
+  { name: 'invalid id', response: () => Response.json({ value: [{ id: 'wrong' }] }) },
+]) {
+  test(`local data readiness fails closed on ${scenario.name}`, async t => {
+    const app = await createLocalApp(async () => scenario.response());
+    t.after(() => app.close());
+    const response = await app.inject({ url: '/health/ready', headers });
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), { status: 'not-ready', dependency: 'data' });
+    assert.equal(response.body.includes('synthetic private failure'), false);
+  });
+}
+
+test('one four-second deadline is shared by the authorized data and service probes', async t => {
+  const deadlines: number[] = [];
+  const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    deadlines.push(milliseconds);
+    return nativeTimeout(milliseconds);
+  });
+  let dataSignal: AbortSignal | null | undefined;
+  const app = await createLocalApp(async (_url, options) => {
+    dataSignal = options?.signal;
+    return Response.json({ value: [] });
+  }, serviceFixture(async (_fetcher, signal) => { assert.equal(signal, dataSignal); }));
+  t.after(() => app.close());
+  assert.equal((await app.inject({ url: '/health/ready', headers })).statusCode, 200);
+  assert.deepEqual(deadlines, [4_000]);
+});
+
+test('missing worker prevents initial listen and closes the new app after bounded retries', async () => {
+  let attempts = 0;
+  let waits = 0;
+  let closed = false;
+  const app = await createLocalApp(async () => Response.json({ value: [] }), serviceFixture(async () => {
+    attempts++;
+    throw new DependencyReadinessError('functions', new Error('synthetic private failure'));
+  }));
+  app.addHook('onClose', async () => { closed = true; });
+  await assert.rejects(startLocalGateway(app, runtimeFor().defaultSql, async () => { waits++; }),
+    error => error instanceof Error && /no ready URL is published/.test(error.message) &&
+      error.cause instanceof Error && /functions.*three read-only attempts/.test(error.cause.message));
+  assert.equal(attempts, 3);
+  assert.equal(waits, 2);
+  assert.equal(app.server.listening, false);
+  assert.equal(closed, true);
+});
+
+for (const failsAfterListen of [false, true]) {
+  test(`initial gateway ${failsAfterListen ? 'closes after failed' : 'requires successful'} real HTTP confirmation`, async t => {
+    let probes = 0;
+    let closed = false;
+    const deadlines: number[] = [];
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+      deadlines.push(milliseconds);
+      return timeout(milliseconds);
+    });
+    const app = await createLocalApp(async () => Response.json({ value: [] }), serviceFixture(async () => {
+      if (++probes > 1 && failsAfterListen) {
+        throw new DependencyReadinessError('functions', new Error('synthetic private worker credential'));
+      }
+    }));
+    t.after(() => app.close());
+    app.addHook('onClose', async () => { closed = true; });
+    const responses = loopbackGateway(t, app);
+    const started = startLocalGateway(app, runtimeFor().defaultSql,
+      async () => { assert.fail('healthy initial readiness must not retry'); });
+    if (failsAfterListen) {
+      await assert.rejects(started, error => error instanceof Error &&
+        /no ready URL is published/.test(error.message) && error.cause instanceof Error &&
+        /functions readiness did not pass initial HTTP confirmation/.test(error.cause.message) &&
+        !error.cause.message.includes('synthetic private'));
+      assert.equal(app.server.listening, false);
+      assert.equal(closed, true);
+      assert.deepEqual(responses, [{ status: 503, body: { status: 'not-ready', dependency: 'functions' } }]);
+    } else {
+      await started;
+      assert.equal(app.server.listening, true);
+      assert.equal(closed, false);
+      assert.deepEqual(responses, [{ status: 200, body: { status: 'ready' } }]);
+    }
+    assert.equal(probes, 2);
+    assert.deepEqual(deadlines, [4_000, 5_000, 4_000]);
+  });
+}
+
+test('initial readiness and cleanup errors are both preserved', async () => {
+  const cleanup = new Error('synthetic gateway cleanup failure');
+  const app = await createLocalApp(async () => Response.json({ value: [] }), serviceFixture(async () => {
+    throw new DependencyReadinessError('functions', new Error('synthetic private worker failure'));
+  }));
+  app.addHook('onClose', async () => { throw cleanup; });
+  await assert.rejects(startLocalGateway(app, runtimeFor().defaultSql, async () => {}),
+    error => error instanceof AggregateError && /no ready URL is published/.test(error.message) &&
+      error.errors.length === 2 && error.errors[0] instanceof Error &&
+      /functions readiness failed after three read-only attempts/.test(error.errors[0].message) &&
+      error.errors[1] === cleanup);
+  assert.equal(app.server.listening, false);
+});
+
+for (const becomesReady of [2, 3]) {
+  test(`initial readiness stops retrying when the worker recovers on attempt ${becomesReady}`, async t => {
+    let attempts = 0;
+    let waits = 0;
+    const app = await createLocalApp(async () => Response.json({ value: [] }), serviceFixture(async () => {
+      if (++attempts < becomesReady) throw new DependencyReadinessError('functions', new Error('starting'));
+    }));
+    t.after(() => app.close());
+    await waitForLocalReadiness(app, async () => { waits++; });
+    assert.equal(attempts, becomesReady);
+    assert.equal(waits, becomesReady - 1);
+    assert.equal(app.server.listening, false);
+  });
+}
+
+test('SQL-only initial readiness does not require service credentials or worker probes', async t => {
+  const app = await createLocalApp(async () => Response.json({ value: [] }));
+  t.after(() => app.close());
+  await waitForLocalReadiness(app, async () => { assert.fail('healthy SQL-only must not retry'); });
+});
+
+test('later worker outage does not gate durable submission and readiness recovers in place', async t => {
+  let missing = false;
+  const app = await createLocalApp(async () => Response.json({ value: [] }), serviceFixture(async () => {
+    if (missing) throw new DependencyReadinessError('functions', new Error('worker unavailable'));
+  }));
+  t.after(() => app.close());
+  await waitForLocalReadiness(app, async () => {});
+  missing = true;
+  const health = await app.inject({ url: '/health/ready', headers });
+  assert.equal(health.statusCode, 503);
+  assert.deepEqual(health.json(), { status: 'not-ready', dependency: 'functions' });
+  assert.equal((await app.inject({ url: '/health/live', headers })).statusCode, 200);
+  const capabilities = (await app.inject({ url: '/auth/config', headers })).json().capabilities;
+  assert.equal(capabilities.jobSubmission, true);
+  assert.equal(capabilities.functions, true);
+  const session = await app.inject({
+    method: 'POST', url: '/local/session', headers, payload: { user: developmentUsers[0]!.id },
+  });
+  const token = z.object({ token: z.string() }).parse(session.json<unknown>()).token;
+  const authenticated = { ...headers, authorization: `Bearer ${token}` };
+  const queued = await app.inject({
+    method: 'POST', url: '/jobs', headers: authenticated, payload: { name: 'readiness-fixture.txt' },
+  });
+  assert.equal(queued.statusCode, 202);
+  assert.deepEqual(queued.json(), { id: '11111111-1111-4111-8111-111111111111' });
+  assert.equal((await app.inject({ url: '/jobs', headers: authenticated })).statusCode, 200);
+  missing = false;
+  assert.equal((await app.inject({ url: '/health/ready', headers })).statusCode, 200);
+});
 
 test('local app serves frontend and explicit SQL-only development capabilities', async t => {
   const app = await createLocalApp();
@@ -11,9 +270,31 @@ test('local app serves frontend and explicit SQL-only development capabilities',
   const config = (await app.inject({ url: '/auth/config', headers })).json();
   assert.equal(config.mode, 'local');
   assert.deepEqual(config.capabilities, { files: false, functions: false });
-  assert.deepEqual(config.users, developmentUsers);
+  assert.equal('users' in config, false);
   assert.equal('clientId' in config, false);
   assert.equal((await app.inject({ url: '/auth/me', headers })).statusCode, 401);
+  const users = await app.inject({ url: '/local/users', headers });
+  assert.equal(users.statusCode, 200);
+  assert.deepEqual(users.json().users, developmentUsers);
+  assert.equal(users.headers['cache-control'], 'no-store');
+});
+
+test('local workspace identity distinguishes the selected capability profile', async t => {
+  const app = await createLocalApp();
+  t.after(() => app.close());
+  const identity = (await app.inject({ url: '/local/workspace', headers })).json();
+  assert.equal(identity.version, 1);
+  assert.equal(identity.profile, 'sql-only');
+  assert.equal(identity.origins.app, localAppOrigin);
+  assert.equal(identity.container, runtimeFor().defaultSql);
+  assert.equal(identity.sourceFingerprint, JSON.parse(await readFile('dist/build-provenance.json', 'utf8')).sourceFingerprint);
+  assert.deepEqual(identity.authentication, { mode: 'preview' });
+});
+
+test('local workspace identity names the explicitly selected SQL container', async t => {
+  const app = await createLocalApp(fetch, undefined, undefined, 'selected-external-sql');
+  t.after(() => app.close());
+  assert.equal((await app.inject({ url: '/local/workspace', headers })).json().container, 'selected-external-sql');
 });
 
 test('local sessions reject remote hosts, cross-origin requests, unknown users and fabricated bearer tokens', async t => {
@@ -81,5 +362,155 @@ test('local app cannot start in a production environment', async () => {
   finally {
     if (previous === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previous;
+  }
+});
+
+test('local preview sessions issue opaque tokens that expire exactly after eight hours', async t => {
+  const started = 1_000;
+  let now = started;
+  t.mock.method(Date, 'now', () => now);
+  const app = await createLocalApp();
+  t.after(() => app.close());
+  const session = await app.inject({ method: 'POST', url: '/local/session', headers, payload: { preview: true } });
+  assert.equal(session.statusCode, 200);
+  const token = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).parse(session.json<unknown>()).token;
+  assert.equal(session.headers['cache-control'], 'no-store');
+  const authenticated = { ...headers, authorization: `Bearer ${token}` };
+  now = started + 8 * 60 * 60 * 1_000 - 1;
+  const active = await app.inject({ url: '/auth/me', headers: authenticated });
+  assert.equal(active.statusCode, 200);
+  assert.equal(active.json().oid, developmentUsers[0]!.id);
+  now++;
+  assert.equal((await app.inject({ url: '/auth/me', headers: authenticated })).statusCode, 401);
+});
+
+test('local preview session selection is a strict union and requires the exact local origin', async t => {
+  const app = await createLocalApp();
+  t.after(() => app.close());
+  assert.equal((await app.inject({ method: 'POST', url: '/local/session',
+    headers: { ...headers, origin: 'https://evil.example' }, payload: { preview: true } })).statusCode, 403);
+  for (const payload of [
+    { preview: true, user: developmentUsers[1]!.id },
+    { preview: true, roles: ['AppUser'] },
+    { user: developmentUsers[0]!.id, roles: ['AppUser'] },
+    {},
+  ]) {
+    const response = await app.inject({ method: 'POST', url: '/local/session', headers, payload });
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(response.json(), { error: 'Choose local preview or a configured development user' });
+  }
+});
+
+test('local Entra verifies signed identity and role without accepting preview sessions or forged DAB claims', async t => {
+  const tenantId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const clientId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const oid = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const authentication = { mode: 'entra', tenantId, clientId } as const;
+  const keys = await generateKeyPair('RS256');
+  const signed = (roles: string[], tid = tenantId) => new SignJWT({ oid, tid, scp: 'access_as_user', roles })
+    .setProtectedHeader({ alg: 'RS256' }).setIssuer(`https://login.microsoftonline.com/${tenantId}/v2.0`)
+    .setAudience(clientId).setIssuedAt().setExpirationTime('5m').sign(keys.privateKey);
+  let upstream = 0;
+  let forwarded = new Headers();
+  const app = await createLocalApp(async (_url, options) => {
+    upstream++;
+    forwarded = new Headers(options?.headers);
+    return Response.json({ value: [] });
+  }, undefined, { profile: 'role-based-data', requiredRole: 'AppUser', readinessPath: '/api/AppReady' },
+  runtimeFor().defaultSql, authentication, async () => keys.publicKey);
+  t.after(() => app.close());
+  const config = await app.inject({ url: '/auth/config', headers });
+  assert.equal(config.statusCode, 200);
+  assert.equal(config.headers['cache-control'], 'no-store');
+  assert.deepEqual(config.json(), { mode: 'entra', tenantId, clientId, scope: `api://${clientId}/access_as_user`,
+    localBackend: true, capabilities: { files: false, functions: false } });
+  assert.equal('users' in config.json(), false);
+  const workspace = await app.inject({ url: '/local/workspace', headers });
+  assert.equal(workspace.statusCode, 200);
+  assert.deepEqual(workspace.json().authentication, authentication);
+  const allowed = { ...headers, authorization: `Bearer ${await signed(['AppUser'])}`,
+    'x-ms-api-role': 'admin', 'x-ms-client-principal': 'forged' };
+  const me = await app.inject({ url: '/auth/me', headers: allowed });
+  assert.equal(me.statusCode, 200);
+  assert.deepEqual(me.json(), { oid, tenantId, roles: ['AppUser'], access: { allowed: true } });
+  assert.equal((await app.inject({ url: '/api/AppReady', headers: allowed })).statusCode, 200);
+  assert.equal(upstream, 1);
+  assert.equal(forwarded.get('authorization'), null);
+  assert.equal(forwarded.get('x-ms-api-role'), 'AppUser');
+  const principal = JSON.parse(Buffer.from(forwarded.get('x-ms-client-principal')!, 'base64').toString());
+  assert.equal(principal.claims.find((claim: { typ: string }) => claim.typ === 'oid').val, oid);
+  const denied = { ...headers, authorization: `Bearer ${await signed([])}`, 'x-ms-api-role': 'AppUser' };
+  const deniedMe = await app.inject({ url: '/auth/me', headers: denied });
+  assert.equal(deniedMe.statusCode, 200);
+  assert.deepEqual(deniedMe.json().access, { allowed: false, requiredRole: 'AppUser' });
+  assert.equal((await app.inject({ url: '/api/AppReady', headers: denied })).statusCode, 403);
+  for (const token of ['invented-preview-token', await signed(['AppUser'], 'dddddddd-dddd-4ddd-8ddd-dddddddddddd')]) {
+    const invalid = { ...headers, authorization: `Bearer ${token}` };
+    assert.equal((await app.inject({ url: '/auth/me', headers: invalid })).statusCode, 401);
+    assert.equal((await app.inject({ url: '/api/AppReady', headers: invalid })).statusCode, 401);
+  }
+  assert.equal(upstream, 1);
+  assert.equal((await app.inject({ method: 'POST', url: '/local/session', headers, payload: { preview: true } })).statusCode, 404);
+  assert.equal((await app.inject({ method: 'DELETE', url: '/local/session', headers: allowed })).statusCode, 404);
+  assert.equal((await app.inject({ url: '/local/users', headers })).statusCode, 404);
+});
+
+test('local Entra readiness remains an independent bounded synthetic dependency read', async t => {
+  const authentication = { mode: 'entra', tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    clientId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } as const;
+  let probes = 0;
+  const app = await createLocalApp(async (url, options) => {
+    probes++;
+    assert.equal(new URL(String(url)).pathname, '/api/AppReady');
+    assert.equal(options?.redirect, 'error');
+    assert.ok(options?.signal);
+    const forwarded = new Headers(options?.headers);
+    assert.equal(forwarded.get('authorization'), null);
+    assert.equal(forwarded.get('x-ms-api-role'), 'AppUser');
+    const principal = JSON.parse(Buffer.from(forwarded.get('x-ms-client-principal')!, 'base64').toString());
+    assert.equal(principal.claims.find((claim: { typ: string }) => claim.typ === 'oid').val, developmentUsers[0]!.id);
+    return Response.json({ value: [] });
+  }, undefined, { profile: 'role-based-data', requiredRole: 'AppUser', readinessPath: '/api/AppReady' },
+  runtimeFor().defaultSql, authentication);
+  t.after(() => app.close());
+  assert.equal((await app.inject({ url: '/health/ready', headers })).statusCode, 200);
+  assert.equal(probes, 1);
+  assert.equal((await app.inject({ url: '/auth/me', headers })).statusCode, 401);
+  assert.equal(probes, 1);
+});
+
+test('local preview serves developer identity testing separately from the product', async t => {
+  const app = await createLocalApp();
+  t.after(() => app.close());
+  const product = await app.inject({ url: '/', headers });
+  assert.equal(product.statusCode, 200);
+  assert.doesNotMatch(product.body, /development-user|select-user|Alice|Bob/);
+  const page = await app.inject({ url: '/__dev/identity', headers });
+  assert.equal(page.statusCode, 200);
+  assert.match(page.body, /Development identity testing/);
+  assert.match(page.body, /id="development-user"/);
+  assert.match(page.body, /src="\/__dev\/identity.js"/);
+  assert.equal(page.headers['cache-control'], 'no-store');
+  assert.match(String(page.headers['content-type']), /^text\/html/);
+  assert.match(String(page.headers['content-security-policy']), /script-src 'self'/);
+  const script = await app.inject({ url: '/__dev/identity.js', headers });
+  assert.equal(script.statusCode, 200);
+  assert.doesNotMatch(script.body, /^import\s/m);
+  assert.equal(script.headers['cache-control'], 'no-store');
+  assert.match(String(script.headers['content-type']), /^text\/javascript/);
+  assert.equal(script.headers['x-content-type-options'], 'nosniff');
+  for (const url of ['/__dev/identity', '/__dev/identity.js']) {
+    assert.equal((await app.inject({ url, headers: { ...headers, host: 'evil.example' } })).statusCode, 403);
+  }
+});
+
+test('local Entra sign-in does not expose developer identity simulation', async t => {
+  const app = await createLocalApp(fetch, undefined, undefined, runtimeFor().defaultSql, {
+    mode: 'entra', tenantId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    clientId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  });
+  t.after(() => app.close());
+  for (const url of ['/__dev/identity', '/__dev/identity.js', '/local/users']) {
+    assert.equal((await app.inject({ url, headers })).statusCode, 404, url);
   }
 });

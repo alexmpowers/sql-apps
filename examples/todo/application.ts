@@ -46,37 +46,39 @@ export const application: ApplicationDefinition = {
   capabilities: ['data', 'visitor-sessions'],
   profiles: ['local-simulation', 'public-demo'],
   routes: [
-    { method: 'GET', path: '/todos' },
-    { method: 'POST', path: '/todos' },
-    { method: 'PATCH', path: '/todos/:id' },
-    { method: 'DELETE', path: '/todos/:id' },
+    { method: 'GET', path: '/api/todos' },
+    { method: 'POST', path: '/api/todos' },
+    { method: 'PATCH', path: '/api/todos/:id' },
+    { method: 'DELETE', path: '/api/todos/:id' },
   ],
   inputs: {
     browser: 'web/app.ts', html: 'web/index.html', css: 'web/app.css',
-    sqlProject: 'demo/database.sqlproj', sqlFiles: ['demo/schema.sql', 'demo/procedures.sql'],
+    sqlProject: 'demo/database.sqlproj',
+    sqlFiles: ['demo/schema.sql', 'demo/procedures.sql', 'demo/post-deploy.sql'],
     grants: 'demo/grants.sql', dab: 'demo/dab-config.json',
+    publicAcceptance: 'tests/public-acceptance.ts',
   },
   procedures: ['CreateSession', 'GetSession', 'DeleteSession', 'Readiness', 'List', 'Create', 'Update', 'Delete'],
   sessions: { create: 'CreateSession', get: 'GetSession', delete: 'DeleteSession', ready: 'Readiness' },
   async register(app, services) {
-    app.get('/todos', async request => {
+    app.get('/api/todos', async request => {
       if (!z.strictObject({}).safeParse(request.query).success) throw new ApplicationError(400, 'Item list does not accept owner or query fields');
       const rows = await execute(services, request, 'List');
       if (rows.length === 1 && rows[0]!.id === null && rows[0]!.title === null && rows[0]!.completed === null) return { items: [] };
       return { items: rows.map(({ id, title, completed }) => item({ id, title, completed })) };
     });
-    app.post('/todos', async (request, reply) => {
+    app.post('/api/todos', async (request, reply) => {
       const body = createSchema.safeParse(request.body);
-      if (!body.success) throw new ApplicationError(400, 'Only a title of 1 to 200 characters is accepted');
+      if (!body.success) throw new ApplicationError(400, 'Only a title of 1 to 200 UTF-16 code units is accepted');
       const rows = await execute(services, request, 'Create', { title: body.data.title });
       if (rows.length !== 1) throw new ApplicationError(502, 'Invalid created item result');
       const { id, title: createdTitle, completed } = rows[0]!;
       return reply.code(201).send(item({ id, title: createdTitle, completed }));
     });
-    app.patch('/todos/:id', async request => {
+    app.patch('/api/todos/:id', async request => {
       const id = parameters(request);
       const body = updateSchema.safeParse(request.body);
-      if (!body.success) throw new ApplicationError(400, 'Change only a title or completion flag');
+      if (!body.success) throw new ApplicationError(400, 'Change only a title of 1 to 200 UTF-16 code units or a completion flag');
       const rows = await execute(services, request, 'Update', {
         id, title: body.data.title ?? null, completed: body.data.completed ?? null,
       });
@@ -85,11 +87,15 @@ export const application: ApplicationDefinition = {
       if (updatedId?.toLowerCase() !== id.toLowerCase()) throw new ApplicationError(502, 'Updated item id mismatch');
       return item({ id: updatedId, title: updatedTitle, completed });
     });
-    app.delete('/todos/:id', async (request, reply) => {
+    app.delete('/api/todos/:id', async (request, reply) => {
       const id = parameters(request);
       if (request.body !== undefined) throw new ApplicationError(400, 'Delete accepts no owner fields or body');
       const rows = await execute(services, request, 'Delete', { id });
       if (rows.length !== 1) throw new ApplicationError(502, 'Invalid deleted item result');
+      const { id: deletedId, title, completed } = rows[0]!;
+      if (item({ id: deletedId, title, completed }).id !== id.toLowerCase()) {
+        throw new ApplicationError(502, 'Deleted item id mismatch');
+      }
       return reply.code(204).send();
     });
   },

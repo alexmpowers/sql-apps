@@ -6,8 +6,13 @@ export interface StoredFile {
   contentType: string;
 }
 
+export interface FilePage {
+  files: { name: string; size: number }[];
+  continuationToken?: string;
+}
+
 export interface FileStore {
-  list?(prefix: string): Promise<{ name: string; size: number }[]>;
+  list?(prefix: string, options: { continuationToken?: string; maxPageSize: number }): Promise<FilePage>;
   put(key: string, bytes: Buffer): Promise<void>;
   get(key: string): Promise<StoredFile | undefined>;
   delete(key: string): Promise<boolean>;
@@ -31,16 +36,17 @@ export function connectionFileStore(connection: string, container: string): File
 
 function containerFileStore(client: ReturnType<BlobServiceClient['getContainerClient']>): FileStore {
   return {
-    async list(prefix) {
+    async list(prefix, options) {
       const files: { name: string; size: number }[] = [];
-      for await (const blob of client.listBlobsFlat({ prefix })) {
+      const page = await client.listBlobsByHierarchy('/', { prefix }).byPage(options).next();
+      if (page.done) return { files };
+      for (const blob of page.value.segment.blobItems) {
         const name = blob.name.slice(prefix.length);
-        if (name && !name.includes('/')) {
-          if (typeof blob.properties.contentLength !== 'number') throw new Error('Blob listing omitted file size');
-          files.push({ name, size: blob.properties.contentLength });
-        }
+        if (!name || name.includes('/')) throw new Error('Blob hierarchy returned an invalid file name');
+        if (typeof blob.properties.contentLength !== 'number') throw new Error('Blob listing omitted file size');
+        files.push({ name, size: blob.properties.contentLength });
       }
-      return files;
+      return { files, ...(page.value.continuationToken ? { continuationToken: page.value.continuationToken } : {}) };
     },
     async put(key, bytes) {
       await client.getBlockBlobClient(key).uploadData(bytes, {

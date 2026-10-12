@@ -1,88 +1,124 @@
-import { PublicClientApplication, InteractionRequiredAuthError } from '@azure/msal-browser';
-import type { BrowserConfig } from '../browser-config.js';
+import { PublicClientApplication, InteractionRequiredAuthError, type AccountInfo, type Configuration } from '@azure/msal-browser';
+import { authRedirectPath, type BrowserConfig } from '../browser-config.js';
 
 export interface BrowserSession {
   name: string;
   getAccessToken: () => Promise<string>;
 }
 
-const tokenKey = 'sql-apps.local-session';
+export interface BrowserAuthentication {
+  session: BrowserSession | undefined;
+  signIn(): Promise<void>;
+  signOut(): Promise<void>;
+  forgetExpiredSession(): void;
+}
 
-export async function configureSession(
+export interface SessionHost {
+  origin: string;
+  fetch: typeof fetch;
+  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+  reload: () => void;
+}
+
+export interface MsalClient {
+  initialize(): Promise<void>;
+  handleRedirectPromise(): Promise<{ account: AccountInfo | null } | null>;
+  getAllAccounts(): AccountInfo[];
+  getActiveAccount(): AccountInfo | null;
+  setActiveAccount(account: AccountInfo | null): void;
+  loginRedirect(options: { scopes: string[]; prompt: 'select_account' }): Promise<void>;
+  logoutRedirect(options: { postLogoutRedirectUri: string; account?: AccountInfo }): Promise<void>;
+  acquireTokenSilent(options: { account: AccountInfo; scopes: string[] }): Promise<{ accessToken: string }>;
+  acquireTokenRedirect(options: { account: AccountInfo; scopes: string[] }): Promise<void>;
+}
+
+export class SessionExpiredError extends Error {
+  override name = 'SessionExpiredError';
+}
+
+export const localSessionKey = 'sql-apps.local-session';
+
+function browserHost(): SessionHost {
+  return {
+    origin: location.origin, fetch: (url, options) => fetch(url, options),
+    storage: sessionStorage, reload: () => location.reload(),
+  };
+}
+
+export async function createPreviewSession(userId?: string, host: SessionHost = browserHost()): Promise<void> {
+  const previous = host.storage.getItem(localSessionKey);
+  const response = await host.fetch('/local/session', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...(previous ? { authorization: `Bearer ${previous}` } : {}) },
+    body: JSON.stringify(userId === undefined ? { preview: true } : { user: userId }),
+    redirect: 'error', signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Local preview could not be opened (${response.status})`);
+  const body: unknown = await response.json();
+  if (!body || typeof body !== 'object' || !('token' in body) || typeof body.token !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/.test(body.token)) {
+    throw new Error('Local preview session response is invalid');
+  }
+  host.storage.setItem(localSessionKey, body.token);
+}
+
+export async function prepareAuthentication(
   config: BrowserConfig,
-  elements: { login: HTMLElement; logout: HTMLElement; local: HTMLElement; users: HTMLSelectElement; select: HTMLButtonElement },
-  report: (error: unknown) => void,
-): Promise<BrowserSession | undefined> {
+  host: SessionHost = browserHost(),
+  createMsal: (configuration: Configuration) => MsalClient = options => new PublicClientApplication(options),
+): Promise<BrowserAuthentication> {
   if (config.mode === 'local') {
-    elements.login.hidden = true;
-    elements.local.hidden = false;
-    elements.users.replaceChildren(...config.users.map(user => {
-      const option = document.createElement('option');
-      option.value = user.id;
-      option.textContent = user.name;
-      return option;
-    }));
-    const token = sessionStorage.getItem(tokenKey);
-    const logout = async () => {
-      const response = await fetch('/local/session', { method: 'DELETE',
-        headers: token ? { authorization: `Bearer ${token}` } : {} });
-      if (!response.ok) throw new Error(`Local sign-out failed (${response.status})`);
-      sessionStorage.removeItem(tokenKey);
-      location.reload();
-    };
-    elements.logout.onclick = () => { void logout().catch(report); };
-    elements.select.onclick = () => {
-      elements.select.disabled = true;
-      void (async () => {
-        const response = await fetch('/local/session', {
-          method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-          body: JSON.stringify({ user: elements.users.value }),
+    const token = host.storage.getItem(localSessionKey);
+    return {
+      session: token ? {
+        name: 'Local preview',
+        getAccessToken: async () => {
+          if (host.storage.getItem(localSessionKey) !== token) throw new SessionExpiredError('Local preview has ended');
+          return token;
+        },
+      } : undefined,
+      signIn: async () => { await createPreviewSession(undefined, host); host.reload(); },
+      signOut: async () => {
+        const current = host.storage.getItem(localSessionKey);
+        const response = await host.fetch('/local/session', {
+          method: 'DELETE', headers: current ? { authorization: `Bearer ${current}` } : {},
+          redirect: 'error', signal: AbortSignal.timeout(10_000),
         });
-        if (!response.ok) throw new Error(`Local session creation failed (${response.status})`);
-        const body: unknown = await response.json();
-        if (!body || typeof body !== 'object' || !('token' in body) || typeof body.token !== 'string') {
-          throw new Error('Local session response is invalid');
-        }
-        sessionStorage.setItem(tokenKey, body.token);
-        location.reload();
-      })().catch(report).finally(() => { elements.select.disabled = false; });
+        if (!response.ok) throw new Error(`Local preview could not be ended (${response.status})`);
+        host.storage.removeItem(localSessionKey);
+        host.reload();
+      },
+      forgetExpiredSession: () => host.storage.removeItem(localSessionKey),
     };
-    if (!token) return undefined;
-    const response = await fetch('/auth/me', { headers: { authorization: `Bearer ${token}` } });
-    if (response.status === 401) {
-      sessionStorage.removeItem(tokenKey);
-      report(new Error('Local session expired. Choose a development user again.'));
-      return undefined;
-    }
-    if (!response.ok) throw new Error(`Local identity lookup failed (${response.status})`);
-    const identity: unknown = await response.json();
-    const user = identity && typeof identity === 'object' && 'oid' in identity
-      ? config.users.find(candidate => candidate.id === identity.oid) : undefined;
-    if (!user) throw new Error('Local session has an unrecognized development identity');
-    elements.users.value = user.id;
-    return { name: user.name, getAccessToken: async () => token };
   }
 
-  const msal = new PublicClientApplication({
-    auth: { clientId: config.clientId, authority: `https://login.microsoftonline.com/${config.tenantId}`, redirectUri: location.origin },
+  host.storage.removeItem(localSessionKey);
+  const msal = createMsal({
+    auth: { clientId: config.clientId, authority: `https://login.microsoftonline.com/${config.tenantId}`,
+      redirectUri: new URL(authRedirectPath, host.origin).href },
     cache: { cacheLocation: 'sessionStorage' },
   });
   await msal.initialize();
   const redirect = await msal.handleRedirectPromise();
-  const account = redirect?.account ?? msal.getAllAccounts()[0];
+  const accounts = msal.getAllAccounts();
+  const account = redirect?.account ?? msal.getActiveAccount() ?? (accounts.length === 1 ? accounts[0] : undefined);
   if (account) msal.setActiveAccount(account);
-  elements.login.onclick = () => { void msal.loginRedirect({ scopes: [config.scope] }).catch(report); };
-  elements.logout.onclick = () => { void msal.logoutRedirect({ postLogoutRedirectUri: location.origin }).catch(report); };
-  if (!account) return undefined;
   return {
-    name: account.username,
-    getAccessToken: async () => {
-      try {
-        return (await msal.acquireTokenSilent({ account, scopes: [config.scope] })).accessToken;
-      } catch (error) {
-        if (error instanceof InteractionRequiredAuthError) await msal.acquireTokenRedirect({ scopes: [config.scope] });
-        throw error;
-      }
-    },
+    session: account ? {
+      name: account.username,
+      getAccessToken: async () => {
+        try {
+          return (await msal.acquireTokenSilent({ account, scopes: [config.scope] })).accessToken;
+        } catch (error) {
+          if (error instanceof InteractionRequiredAuthError) {
+            await msal.acquireTokenRedirect({ account, scopes: [config.scope] });
+            throw new SessionExpiredError('Continue Microsoft sign-in to renew your session');
+          }
+          throw error;
+        }
+      },
+    } : undefined,
+    signIn: () => msal.loginRedirect({ scopes: [config.scope], prompt: 'select_account' }),
+    signOut: () => msal.logoutRedirect({ postLogoutRedirectUri: host.origin, ...(account ? { account } : {}) }),
+    forgetExpiredSession: () => msal.setActiveAccount(null),
   };
 }

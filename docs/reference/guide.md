@@ -39,6 +39,8 @@ These are scope decisions, not switches that dynamically compose services. The f
 
 Optional `costPreference` is `zero-azure-spend` or `review-paid-costs`. It is never spending consent.
 
+The report's `profile` is `role-based-data` when `role-based-data.json` exists in the checkout, otherwise `null`. `suggestedProfile` is that configured profile; without one, a saved brief suggests `role-based-data` for data-only capabilities and `foundation` when it includes `files` or `background-jobs` (`null` before a brief). The suggestion fills the `setup plan --profile` hint and selects `role-based-cost` or `demo-cost` for the cost review. It is advice, not configuration: a suggested `role-based-data` still needs `role-based-data.json`, which `setup plan` reports.
+
 ## Record historical evidence
 
 An optional checkpoint records what was actually checked:
@@ -59,7 +61,7 @@ Use the actual stage: scope agreement is `describe`, browser launch/save/reload 
 
 Before saving, replace a completed `nextChange` with the next agreed outstanding change or explicit text such as "No further change agreed"; the required text field cannot be omitted. Saving replaces the current brief/checkpoint, not an append-only history. Keep earlier evidence explicitly historical if retained; do not invent unsupported fields.
 
-`guide` does not model live launch state or detect whether `nextChange` is implemented. Its setup suggestion is not a demand to redo completed setup: reconcile it with verified setup, responding services and outstanding acceptance. Report implemented, built, running and workflow-verified separately.
+`guide` does not model live launch state or detect whether `nextChange` is implemented. Its setup suggestion is not a demand to redo completed setup: reconcile it with verified setup, responding services and outstanding acceptance. Use the validation skill for current evidence and reporting.
 
 ## Storage and failure handling
 

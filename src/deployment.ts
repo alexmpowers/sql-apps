@@ -1,11 +1,13 @@
-import { mkdir, readFile, writeFile, rename, open, unlink, realpath } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink, realpath } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { deploymentSchema, environmentKey, type DeploymentConfig } from './config.js';
+import { authRedirectPath } from './browser-config.js';
 import { type Run } from './process.js';
 import { imageDigest, deploymentImageFields } from './artifacts.js';
 import { validateRoleBasedCloudDab, roleBasedProcedureGrants, roleBasedSchemaFingerprint } from './role-based-profile.js';
+import { withFileLock } from './file-lock.mjs';
 
 const outputSchema = z.object({
   sqlServer: z.string().regex(/^[a-z0-9-]+\.database\.windows\.net$/),
@@ -86,12 +88,8 @@ export async function saveJson(path: string, value: unknown): Promise<void> {
   }
 }
 
-export async function withDeploymentLock<T>(path: string, action: () => Promise<T>): Promise<T> {
-  await mkdir(dirname(path), { recursive: true });
-  const lock = `${path}.lock`;
-  const handle = await open(lock, 'wx');
-  try { return await action(); }
-  finally { await handle.close(); await unlink(lock); }
+export function withDeploymentLock<T>(path: string, action: () => Promise<T>): Promise<T> {
+  return withFileLock(`${path}.lock`, action);
 }
 
 export async function readConfig(path: string): Promise<DeploymentConfig> {
@@ -304,7 +302,8 @@ export async function configureRedirect(config: DeploymentConfig, origin: string
   const registration = z.object({
     id: z.string().uuid(), spa: z.object({ redirectUris: z.array(z.string()) }),
   }).parse(JSON.parse(await run('az', ['ad', 'app', 'show', '--id', config.apiClientId, '-o', 'json'])));
-  const redirectUris = [...new Set([...registration.spa.redirectUris, origin])];
+  const redirectUri = new URL(authRedirectPath, origin).href;
+  const redirectUris = [...new Set([...registration.spa.redirectUris, redirectUri])];
   const path = `${statePath(config)}.redirect.json`;
   await writeFile(path, JSON.stringify({ spa: { redirectUris } }));
   await run('az', ['rest', '--method', 'PATCH', '--url', `https://graph.microsoft.com/v1.0/applications/${registration.id}`, '--body', `@${path}`, '-o', 'none']);

@@ -27,15 +27,17 @@ If you know SQL, bring your tables and relationships into the discussion. If not
 
 ## 2. Build and run the first version
 
-Complete [Get started](getting-started.md) before downloading dependencies or launching the app. Then ask:
+Complete [Get started](getting-started.md) before downloading dependencies or launching the app.
 
-> Implement the agreed screens and SQL behavior using this foundation. Explain the files you change and help me run the app locally.
+Choose the capability profile before writing code. After you save the agreed scope, `npm run guide` reports a `suggestedProfile`: `role-based-data` for data-only apps and `foundation` when files or background jobs were agreed. The [role-based-data profile](../reference/role-based-data.md) provides SQL/DAB/browser startup with trusted application-role forwarding and a matching paid private-SQL Azure path. Domain screens, procedures and actual workflow acceptance still need implementation. The full foundation retains files/jobs; do not add excluded services or switch to anonymous access just to fit a template.
+
+Then ask:
+
+> Implement the agreed screens and SQL behavior using the suggested SQL Apps profile. Explain the files you change and help me run the app locally.
 
 Your AI assistant can help write your frontend, API and schema; SQL Apps does not generate a complete domain app automatically. Review its changes and use the startup path for your application in [Run locally](run-locally.md). Trying the Todo reference is optional, not a prerequisite.
 
-For substantial new screens or a visual redesign, ask your assistant to use the `sql-apps-frontend-design` skill for an app-appropriate visual direction and browser review of the rendered interface.
-
-Check capability/access support early: the [role-based-data profile](../reference/role-based-data.md) provides SQL/DAB/browser startup with trusted application-role forwarding and a matching paid private-SQL Azure path. Domain screens, procedures and actual workflow acceptance still need implementation. The full foundation retains files/jobs; do not add excluded services or switch to anonymous access just to fit a template.
+For substantial new screens or a visual redesign, ask your assistant to use the `sql-apps-design` skill for an app-appropriate visual direction and browser review of the rendered interface.
 
 In the browser, create a test record and reload the page. Check that it is still there. Try a missing required field and, if the app has different users, check who can see or edit the record. Use synthetic data while developing.
 
@@ -49,13 +51,13 @@ Try the new behavior, check that old actions still work, and run the relevant te
 
 ## Pick up where you left off
 
-Keep a short description of the agreed app and next change. You can ask your AI assistant to save it with the project's guide command:
+Keep a short description of the agreed app and next change. Ask your AI assistant to write the agreed brief to an untracked JSON file, then save it with:
 
 ```powershell
-npm run guide
+node scripts/guide.mjs --save "C:\path\to\project-brief.json"
 ```
 
-This shows saved decisions and a suggested next step. Saved check results are historical; it does not start the app or check that running services are healthy. Record launch evidence under `run-locally`, not `describe`, and update an already completed `nextChange` rather than repeating it. Distinguish completed setup, running services and outstanding browser acceptance. After a code change, run the affected workflow again. See the [guide command reference](../reference/guide.md).
+The plugin equivalent is `guide-save "<absolute-brief-path>"`. Run `npm run guide` afterward to show saved decisions and the suggested next step. Saved check results are historical; the command does not start the app or check running services. After a code change, run the affected workflow again. See the [guide command reference](../reference/guide.md) for the brief format.
 
 ## 4. Share when it is useful
 

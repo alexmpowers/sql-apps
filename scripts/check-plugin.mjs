@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile, readdir, lstat } from 'node:fs/promises';
-import { dirname, join, resolve, extname } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const checkout = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const plugin = join(checkout, 'plugins', 'sql-apps');
-export const skillNames = ['sql-apps-local', 'sql-apps-diagnostics', 'sql-apps-validation', 'sql-apps-cloud-preview', 'sql-apps-application', 'sql-apps-frontend-design'];
+export const skillNames = ['sql-apps-local', 'sql-apps-diagnostics', 'sql-apps-validation', 'sql-apps-cloud-preview', 'sql-apps-application', 'sql-apps-design'];
 const runtimeSkillNames = ['sql-apps-local', 'sql-apps-diagnostics', 'sql-apps-validation', 'sql-apps-cloud-preview', 'sql-apps-application'];
 
 export async function checkPlugin() {
   const manifest = JSON.parse(await readFile(join(plugin, 'plugin.json'), 'utf8'));
   assert.equal(manifest.$schema, 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json');
   assert.equal(manifest.name, 'sql-apps');
-  assert.equal(manifest.version, '0.1.0');
+  assert.equal(manifest.version, '0.1.1');
   assert.ok(manifest.description?.length);
   const allowed = new Set(['$schema', 'name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords']);
   assert.ok(Object.keys(manifest).every(key => allowed.has(key)), 'Manifest uses only Agent Plugins 1.0 metadata fields');
@@ -35,26 +35,30 @@ export async function checkPlugin() {
     } else {
       assert.match(content, /sql-apps-application.*authoritative|authoritative.*sql-apps-application/i, 'Design guidance defers SQL Apps setup and project authority to the application skill');
     }
-    assert.match(content, /absolute/i);
-    assert.ok(content.length < 12000, 'Keep skills focused and discoverable');
+    assert.ok(content.length < 7000, 'Keep skills focused; move detailed cases to on-demand references');
   }
   const files = [];
+  const expectedFiles = [
+    join(plugin, 'LICENSE'),
+    join(plugin, 'plugin.json'),
+    join(plugin, 'scripts', 'sql-apps.mjs'),
+    ...skillNames.map(name => join(plugin, 'skills', name, 'SKILL.md')),
+    ...['craft-floor.md', 'ui-style-recipes.md', 'visual-style-recipes.md', 'formatting.md']
+      .map(name => join(plugin, 'skills', 'sql-apps-design', 'references', name)),
+  ];
   async function inspect(directory) {
     for (const name of await readdir(directory)) {
       const path = join(directory, name);
       const info = await lstat(path);
       assert.equal(info.isSymbolicLink(), false, 'Do not ship symlinks to runtime state');
       if (info.isDirectory()) await inspect(path);
-      else {
-        assert.ok(['.json', '.md', '.mjs'].includes(extname(path)), `Unexpected bundle file ${name}`);
-        files.push(path);
-      }
+      else files.push(path);
     }
   }
-  assert.deepEqual((await readdir(plugin)).sort(), ['plugin.json', 'scripts', 'skills']);
+  assert.deepEqual((await readdir(plugin)).sort(), ['LICENSE', 'plugin.json', 'scripts', 'skills']);
   await inspect(plugin);
-  assert.equal(files.length, 8, 'Bundle contains only manifest, launcher and six skills');
-  console.log('Local plugin packaging passed: six skills, portable manifest, clean isolated bundle and matching marketplaces.');
+  assert.deepEqual(files.sort(), expectedFiles.sort(), 'Bundle contains only the declared manifest, launcher, six skills, four design references and MIT license');
+  console.log('Local plugin packaging passed: six skills, four design references, MIT license, portable manifest, clean isolated bundle and matching marketplaces.');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

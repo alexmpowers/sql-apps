@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 COPY tsconfig*.json ./
+COPY scripts/workspace-check.mjs scripts/workspace-check.d.mts ./scripts/
 COPY src ./src
 COPY functions ./functions
 RUN npx tsc --project tsconfig.runtime.json && npm prune --omit=dev

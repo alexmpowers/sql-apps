@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { fileJobSchema } from '../src/file-jobs.js';
+
+test('file job responses enforce the SQL filename limit in UTF-16 units', () => {
+  const row = { id: '11111111-1111-4111-8111-111111111111', filename: '',
+    status: 'queued', sha256: null, byte_count: null, line_count: null, error: null };
+  for (const filename of ['x'.repeat(128), String.fromCodePoint(0x1F33F).repeat(64)]) {
+    assert.equal(fileJobSchema.parse({ ...row, filename }).filename, filename);
+    assert.equal(fileJobSchema.safeParse({ ...row, filename: filename + 'x' }).success, false);
+  }
+});
 
 test('starter deployment names use sqlapps for generated URL prefixes', async () => {
   const config = JSON.parse(await readFile('sql-apps.example.json', 'utf8'));
@@ -40,9 +50,5 @@ test('SQL enforces ownership on reads and writes independently of HTTP input', a
   assert.match(grants, /GRANT SELECT ON dbo\.FileJobs TO \[sql_apps_dab\]/);
   assert.match(grants, /DATABASE_PRINCIPAL_ID\(N'sql_apps_dab'\)/);
   assert.match(grants, /CREATE USER \[sql_apps_dab\] WITH SID/);
-  for (const [path, name] of [
-    ['sql/database.sqlproj', 'SqlApps'],
-    ['examples/todo/database.sqlproj', 'SqlAppsTodoExample'],
-    ['examples/todo/demo/database.sqlproj', 'SqlAppsTodoDemo'],
-  ] as const) assert.ok((await readFile(path, 'utf8')).includes(`<Name>${name}</Name>`));
+  assert.ok((await readFile('sql/database.sqlproj', 'utf8')).includes('<Name>SqlApps</Name>'));
 });

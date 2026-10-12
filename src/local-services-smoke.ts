@@ -65,8 +65,8 @@ export async function testLocalServices(container: string): Promise<void> {
     await alice.upload(name, bytes);
     assert.deepEqual(Buffer.from(await alice.download(name)), bytes, 'Exact 4 MiB Blob roundtrip');
     await denied(() => alice.upload(name, Buffer.alloc(bytes.length + 1)), [413]);
-    assert.equal((await alice.listFiles()).find(file => file.name === name)?.size, bytes.length);
-    assert.equal((await bob.listFiles()).some(file => file.name === name), false);
+    assert.equal((await alice.listFiles()).files.find(file => file.name === name)?.size, bytes.length);
+    assert.equal((await bob.listFiles()).files.some(file => file.name === name), false);
     await denied(() => bob.download(name));
     await denied(() => bob.deleteFile(name));
     await bob.upload(name, Buffer.from('Bob owns this separate file'));
@@ -118,6 +118,16 @@ export async function testLocalServices(container: string): Promise<void> {
     assert.deepEqual((await alice.listJobs()).find(job => job.id === id), completed, 'Duplicate delivery is idempotent');
     console.log('Real Functions HTTP/queue, snapshot integrity, role escalation denial and duplicate delivery passed.');
 
+    const { localCommand } = await import('./local.js');
+    await localCommand('data', container, run);
+    await alice.upload(name, Buffer.from('DAB recreated without replacing Functions'));
+    const recreatedDataId = await alice.processFile(name);
+    jobs.push({ client: alice, id: recreatedDataId });
+    const recreatedDataJob = await wait(alice, recreatedDataId, 'completed');
+    assert.equal(recreatedDataJob.sha256,
+      createHash('sha256').update('DAB recreated without replacing Functions').digest('hex'));
+    console.log('Existing Functions processed a job after DAB recreation through stable Docker DNS.');
+
     const failedId = randomUUID();
     const failedKey = `${tenantId}/${owner}/jobs/${failedId}`;
     await data.create(owner, { id: failedId, filename: name, blob_key: failedKey });
@@ -154,7 +164,7 @@ export async function testLocalServices(container: string): Promise<void> {
       '--network', names.network, '--env', 'AzureWebJobsStorage', '--env', 'LOCAL_FUNCTION_SECRET', '--env', 'LOCAL_DAB_URL',
       '--env', 'FUNCTIONS_WORKER_RUNTIME=node', '--env', 'SQL_APPS_LOCAL_FUNCTIONS=true', runningImage],
     { env: { AzureWebJobsStorage: storageConnection(state.key, await address(names.storage)),
-      LOCAL_DAB_URL: `http://${await address(names.data)}:5000`, LOCAL_FUNCTION_SECRET: state.secret },
+      LOCAL_DAB_URL: `http://${names.data}:5000`, LOCAL_FUNCTION_SECRET: state.secret },
       redact: [state.key, state.secret] });
     assert.equal((await run('docker', ['inspect', '--format', '{{.Image}}', offlineName])).trim(), runningImage,
       'Offline proof must use the actual running worker image, not a moved tag or newer local build');

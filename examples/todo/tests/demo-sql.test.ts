@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { application } from '../examples/todo/application.js';
+import { application } from '../application.js';
 
 test('selected demo DAB is anonymous internal procedure execution only', async () => {
   const config = JSON.parse(await readFile('examples/todo/demo/dab-config.json', 'utf8'));
@@ -24,6 +24,8 @@ test('selected schema owns hashed visitor data separately from authenticated exa
   assert.match(schema, /token_hash char\(64\)/i);
   assert.match(schema, /expires_at datetime2/i);
   assert.match(schema, /ON DELETE CASCADE/i);
+  assert.match(schema, /DemoLimits/i);
+  assert.match(schema, /global_mutation_count/i);
   assert.doesNotMatch(schema, /owner_oid|SESSION_CONTEXT|varchar\(43\)/i);
   const grants = await readFile('examples/todo/demo/grants.sql', 'utf8');
   assert.doesNotMatch(grants, /GRANT\s+(?:SELECT|INSERT|UPDATE|DELETE|CONTROL)|db_owner|db_datareader|db_datawriter/i);
@@ -31,4 +33,22 @@ test('selected schema owns hashed visitor data separately from authenticated exa
   const project = await readFile('examples/todo/demo/database.sqlproj', 'utf8');
   assert.match(project, /SqlAzureV12DatabaseSchemaProvider/);
   assert.doesNotMatch(project, /owner\.sql|FileJobs|Include=.*\.\./);
+});
+
+test('public demo SQL enforces global session and mutation limits under update locks', async () => {
+  const procedures = await readFile('examples/todo/demo/procedures.sql', 'utf8');
+  assert.match(procedures, /COUNT_BIG\(\*\)[\s\S]*DemoSessions[\s\S]*>=\s*1000[\s\S]*capacity/i);
+  assert.match(procedures, /DemoLimits\s+WITH\s*\(UPDLOCK,\s*HOLDLOCK\)/i);
+  assert.match(procedures, /global_count\s*>=\s*300[\s\S]*rate_limited/i);
+  const readiness = procedures.match(/CREATE PROCEDURE dbo\.DemoReadiness([\s\S]*?)\nGO/i)?.[1] ?? '';
+  assert.match(readiness, /DemoLimits[\s\S]*id\s*=\s*1/i);
+  assert.match(readiness, /THROW\s+51002/i);
+});
+
+test('example SQL projects and browser identity stay scoped to the reference', async () => {
+  for (const [path, name] of [
+    ['examples/todo/database.sqlproj', 'SqlAppsTodoExample'],
+    ['examples/todo/demo/database.sqlproj', 'SqlAppsTodoDemo'],
+  ]) assert.ok((await readFile(path!, 'utf8')).includes(`<Name>${name}</Name>`));
+  assert.match(await readFile('examples/todo/web/index.html', 'utf8'), /<title>SQL Apps - synthetic Todo demo<\/title>/);
 });

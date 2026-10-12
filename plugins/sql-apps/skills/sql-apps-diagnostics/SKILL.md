@@ -1,26 +1,29 @@
 ---
 name: sql-apps-diagnostics
-description: "Use when checking SQL Apps service status, diagnosing local startup failures, unavailable backend services, stuck or failed file-processing jobs, retry history, feature flags, or the local OpenTelemetry dashboard."
+description: "Use when a SQL Apps local service, startup, readiness probe, file-processing job, retry, maintenance task or trace dashboard is failing."
 ---
 
-# Diagnose the local SQL Apps application
+# Diagnose SQL Apps locally
 
-SQL Apps is a standalone project with its own runtime and workflow. Use only SQL Apps skills and project-owned commands for SQL Apps work. Do not disable or modify other installed plugins.
-Confirm the intended SQL Apps application directory before edits. Do not infer a directory from another plugin, session title or conversation history. If the active project is unrelated or the target is unclear, ask which directory to use; do not convert or overwrite it.
+Resolve `../../scripts/sql-apps.mjs` from this installed skill and run its absolute path with `home`. Confirm the application checkout with `workspace-check`; do not inspect a plugin cache, guess another checkout or overwrite a mismatch.
 
-Resolve `../../scripts/sql-apps.mjs` relative to this installed skill and use its absolute path. Run `node "<absolute-script-path>" home` to locate the application, then read its `docs/reference/local-development.md`. Never assume the current project or plugin cache is the runtime checkout. Missing/invalid binding is an error; ask for the checkout path instead of guessing.
-Run read-only `workspace-check` to confirm active/bound home, source/build provenance and selected workspace origins before status or lifecycle commands. A mismatch requires explicit `SQL_APPS_HOME`; never copy uncommitted source or overwrite the binding/descriptor implicitly.
+Read `docs/reference/local-development.md` for the failing subsystem only. Run `setup status --profile <agreed-profile> --json` and `status`. Report the first named blocker and the command that continues after it. HTTP health does not prove SQL permissions, storage, worker behavior or browser acceptance.
 
-For a returning beginner, run the read-only `guide` after binding checks and follow `docs/guides/build-your-app.md`. Saved progress is historical, not current acceptance; source changes require local re-verification. Explain what passed, the one blocking step and its expected next result before presenting technical details. The guide brief is not a credential file; never inspect adjacent private state to recover context. Do not start services, reinstall tools or switch to Azure just because a checkpoint is missing.
+## Find the cause
 
-Cost/scale questions use `docs/reference/demo-cost.md`. Offline `demo-cost` reports assumptions and blockers, not actual billing or remaining grants. Diagnose free-tier exhaustion separately from idle resume or revoked access; never enable paid continuation as a repair. Budgets do not stop spending. Actual Azure usage/cost queries need separate target/read-only authorization.
+1. Reproduce the failing action. Keep a positive control when testing authorization, Origin or validation.
+2. Inspect only project-owned bounded logs, workspace state and documented containers. Do not dump environment variables, credential state or private files.
+3. For prerequisites, use `setup-check`. Distinguish missing, unsupported and broken installed tools; none grants installation permission.
+4. Check `local-settings.json` at the workspace path reported by `workspace-check`. Invalid settings fail explicitly and require the affected services to restart.
+5. For jobs, use the signed-in user's status and trace dashboard. A retry creates a new parent-linked job; obtain approval before submitting it. Missing snapshots require reupload.
+6. Restart only the affected owned service after identifying the cause, then repeat the same action.
 
-1. For first-time setup or missing tools, read `docs/guides/getting-started.md` and run `node "<absolute-script-path>" setup-check` before restore/build. It is read-only and returns actionable JSON even without compiled runtime/dependencies. Missing Node needs guided official installation first. Ask before every installation/download, license acceptance or system change; stop for human-only steps and give a resume instruction. Never ask for passwords in chat or claim universally account-free SQL preview acquisition. For runtime health run `node "<absolute-script-path>" status`. Report each actual result; HTTP health does not certify Functions, storage, SQL permissions or cloud readiness.
-2. Inspect only project-owned container state and bounded logs, following documented service names and ownership labels. Avoid full environment/container inspection: it can print account keys and passwords. Never read/print the credential state files or pass secrets into chat.
-3. For processing, inspect the signed-in user's browser job status and trace dashboard. Jobs update automatically; outages show backoff and recover when dependencies return. Do not impersonate another user or generate server-only processor claims.
-4. Check optional `local-settings.json` at the selected workspace state path reported by workspace-check (legacy `.sql-apps/local-settings.json`) against `local-settings.example.json` in the application checkout. Invalid configuration must fail explicitly; settings load at startup, so both worker and gateway must restart after changes.
-5. Failed jobs can **Retry snapshot** as a new parent-linked job without losing failure history. Missing snapshots require reuploading. Retry is a mutation; get permission before submitting it on the user's behalf.
-6. The actual minute timer recovers stale jobs (60 minutes by default). `node "<absolute-script-path>" maintain` runs the same policy, but can delete data when retention is enabled. Inspect the policy and get explicit approval first. Never enable retention as a troubleshooting shortcut.
-7. Restart only the affected project-owned service after identifying the cause, then verify recovery with the same failing action. Do not kill processes by name, reset volumes, disable authentication or swallow errors. Exhausted SQL error-904/control-plane reconciliation is not evidence of lost registry access. For an isolated workspace's stopped owned SQL container, explain the effects and ask separate approval for `node "<absolute-script-path>" recover-sql`; it preserves the image version, credentials, ports and labeled data resources. It never stops a running or external/legacy SQL container. Interrupted recovery keeps sensitive local state: resume the command without reading/printing that state or regenerating credentials. After SQL readiness, resume `app` to refresh DAB connections and repeat the real application action.
+Use `setup resume` after fixing a setup blocker. Do not reinstall tools, reset volumes, regenerate credentials, disable authentication, kill processes by name or switch to Azure as a troubleshooting shortcut.
 
-Trace records omit file contents/credentials and are owner-scoped. This is local OpenTelemetry with a Blob exporter, not Azure Monitor. SQL/Blob/Queue are not an atomic transaction; do not promise exactly-once delivery or a transactional outbox.
+SQL recovery and maintenance are separate mutations. Show their consent plan and obtain one-operation approval. Recovery preserves the selected image, credentials, ports and labeled data; retention may delete data. Resume interrupted recovery without printing sensitive state.
+
+Keep resolved failures as history, but separate them from current blockers. If source changed during a comparison, report the difference; never reset another writer's work or replace the baseline.
+
+Trace records are owner-scoped and omit file contents and credentials. SQL, Blob and Queue are not one atomic transaction, so do not promise exactly-once delivery.
+
+If an approval or completion control is unavailable, say so and wait for explicit consent or report ordinary evidence. Tool failure is never approval.

@@ -16,16 +16,16 @@ The installer:
 
 1. Validates the dedicated plugin bundle and marketplace paths.
 2. Registers this checkout as the local `sql-apps-skills` marketplace.
-3. Installs/enables `sql-apps@sql-apps-skills` and verifies actual discovery of all five skills.
+3. Installs/enables `sql-apps@sql-apps-skills` and verifies actual discovery of all six skills.
 4. Binds the runtime to this checkout in `~/.copilot/sql-apps-local.json` (or `COPILOT_HOME` if set). The binding stores only a version and absolute directory, no secrets.
 
 Rerunning the installer is safe for the same checkout/profile. It refuses to replace a conflicting marketplace, differently sourced plugin, or runtime binding. Unrelated existing plugins are not disabled or modified.
 
-Only [plugins/sql-apps](../../plugins/sql-apps) is the installed package: manifest, five skills and a Node launcher. Runtime code, `.sql-apps` credentials, dependencies and SQL/Blob volumes stay outside the package. **Use this local marketplace, not a direct repository-root installation**, which is the older compatibility package.
+Only [plugins/sql-apps](../../plugins/sql-apps) is the installed package: manifest, six skills, four design references, an MIT license and a Node launcher. Runtime code, `.sql-apps` credentials, dependencies and SQL/Blob volumes stay outside the package. **Use this local marketplace, not a direct repository-root installation**, which is the older compatibility package.
 
 ## Use the GitHub Copilot App
 
-Restart the App or create a **fresh session** after installation. In **Customize -> Plugins**, look for **sql-apps**, marketplace **sql-apps-skills**, version **0.1.0**, enabled. Its skills should appear under **Skills**:
+Restart the App or create a **fresh session** after installation. In **Customize -> Plugins**, look for **sql-apps**, marketplace **sql-apps-skills**, version **0.1.1**, enabled. Its skills should appear under **Skills**:
 
 | Skill | Example prompt |
 | --- | --- |
@@ -34,6 +34,18 @@ Restart the App or create a **fresh session** after installation. In **Customize
 | `sql-apps-validation` | Run SQL Apps unit tests and typecheck; do not restart services. |
 | `sql-apps-cloud-preview` | Explain SQL Apps cloud prerequisites and costs; do not deploy. |
 | `sql-apps-application` | Build a domain-specific application without copying the Todo example; verify source, build, API and database boundaries. |
+| `sql-apps-design` | Agree on a custom app's visual direction and review its rendered desktop/mobile experience. |
+
+The [design skill](../../plugins/sql-apps/skills/sql-apps-design/SKILL.md) includes a
+[craft floor](../../plugins/sql-apps/skills/sql-apps-design/references/craft-floor.md),
+[UI style recipes](../../plugins/sql-apps/skills/sql-apps-design/references/ui-style-recipes.md),
+[visual style recipes](../../plugins/sql-apps/skills/sql-apps-design/references/visual-style-recipes.md)
+and [visual formatting rules](../../plugins/sql-apps/skills/sql-apps-design/references/formatting.md).
+Its SQL Apps scope and compatibility section takes precedence over stack-specific examples:
+use the application's actual styling system, tokens and dependencies rather than assuming
+the named frontend files, hooks or packages are supplied by SQL Apps. New packages or
+font/image downloads still need explicit approval. SQL, identity and runtime decisions
+remain in `sql-apps-application`.
 
 Invoke a skill explicitly from the App's skill picker/slash completion if natural-language discovery picks another plugin instead. Ask for **SQL Apps** and confirm the **sql-apps-skills** marketplace. The plugin does not embed the browser UI; use the startup-reported origin (`http://127.0.0.1:18080/` in fixed-port mode) for the actual application.
 
@@ -48,6 +60,8 @@ Plugin availability is shared within the Copilot profile; these instructions cla
 For beginners: **"Guide me through SQL Apps setup one step at a time. Ask before installing tools, downloading dependencies or changing my system. Do not deploy to Azure."** The local skill reads the OS-specific guide, runs setup checks, offers native approved installs and pauses for human-only license/restart/credential steps. No blanket installation or license approval is implied by enabling the plugin.
 
 For building an app: **"Help me describe, run and change a useful SQL Apps app locally. Ask about its users, information and actions, not cloud architecture. Sharing is optional."** Follow the [build walkthrough](../guides/build-your-app.md). Use `guide` to recover saved decisions and `guide-save <absolute-brief-path>` to save an agreed brief. Historical evidence never replaces live acceptance or authorizes installations/cloud writes.
+
+For repeated local use, see [remembered permissions](local-consent.md). `setup approval --profile <p>` shows the single local approval (restore, build, workspace, startup, SQL terms) and `setup approve ... --approval <id>` records it after explicit human approval. The launcher's pre-build `consent-plan|consent-status <operation> [selection]`, `consent-grant|consent-grant-once <absolute-plan.json>`, `consent-terms <absolute-reviewed-document>`, `consent-revoke [scope|terms]` and `consent-run <operation> [selection]` remain for individual scopes and target the selected application checkout. Consult matching grants before asking again.
 
 The local marketplace loads from disk (`source: live` in CLI output). Edit the bundled skills or launcher, run `npm run plugin:check`, then start a fresh session/restart to load changes. No Git push or plugin update is needed for this directory-backed source. After TypeScript runtime changes, separately build/restart the application as documented.
 
@@ -64,6 +78,19 @@ copilot plugin marketplace browse sql-apps-skills
 The installer verifies the CLI loader when you run it. Check the visible App session/skill picker in your actual profile too; an already-open session may retain old capabilities.
 
 ## Runtime binding and direct checks
+
+For a connected first-run or return journey, the same launcher exposes
+`setup plan|status|run|resume` before dependency restore or build. For example:
+
+```powershell
+node "C:\git\sql-apps\plugins\sql-apps\scripts\sql-apps.mjs" setup plan --profile role-based-data --json
+```
+
+Select the profile from agreed app scope. See [Setup coordinator](setup.md) for
+workspace selection, approvals, installation plans and continuation. `setup`
+forwards arguments literally to the bound checkout's coordinator and retains
+source/binding checks. It does not change loaded skills, grant permissions,
+install another assistant, generate domain screens or deploy.
 
 The launcher resolves the runtime independently of the session's current project:
 

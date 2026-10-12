@@ -1,6 +1,6 @@
 import type { ContainerClient } from '@azure/storage-blob';
 import { localJobData } from './local-job-data.js';
-import { deleteLocalJobSnapshot } from './local-job-snapshots.js';
+import { deleteLocalJobSnapshot, tryWithJobSnapshotLease } from './local-job-snapshots.js';
 import type { LocalSettings } from './local-settings.js';
 import type { FileJob } from './file-jobs.js';
 
@@ -27,13 +27,18 @@ export async function maintainLocalJobs(
 ) {
   const result = { recovered: 0, removedJobs: 0, removedSnapshots: 0, removedTraces: 0 };
   for (const oid of owners) {
-    const rows = await jobs.list(oid);
+    const rows = await jobs.listAll(oid);
     const active = new Set(rows.map(job => job.id));
     for (const job of rows) {
       const action = maintenanceAction(job, settings, now);
       if (action === 'recover') {
-        await jobs.update(oid, job.id, { status: 'failed', error: 'Job exceeded the recovery timeout; retry the saved snapshot when services are healthy' });
-        result.recovered++;
+        const snapshot = files.getBlockBlobClient(`${localTenantId}/${oid}/jobs/${job.id}`);
+        const recovered = await tryWithJobSnapshotLease(snapshot, () =>
+          jobs.update(oid, job.id, {
+            status: 'failed',
+            error: 'Job exceeded the recovery timeout; retry the saved snapshot when services are healthy',
+          }));
+        if (recovered) result.recovered++;
       } else if (action === 'remove') {
         const removed = await deleteLocalJobSnapshot(jobs, files, localTenantId, oid, job.id);
         active.delete(job.id);

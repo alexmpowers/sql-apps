@@ -20,7 +20,7 @@ This reads the [example contract](../../azure-demo-cost.example.json) and produc
 - Exit **2**: zero-spend is blocked or fixed-charge acknowledgement is missing.
 - Exit **1**: invalid input or command failure.
 
-The command is an offline review, not an enforced Azure spending cap. It does not intercept arbitrary Bicep/CLI deployments or certify eligibility. The guided demo deployment remains unfinished.
+The command is an offline review, not an enforced Azure spending cap. It does not intercept arbitrary Bicep/CLI deployments or certify eligibility. The candidate guided publishing interface is documented in [public-demo deployment](demo-deployment.md); it remains gated and is not the default.
 
 Do not remove narrow SQL access, enable a broad Azure-services rule, publish private source/images or change registries to claim zero cost. An alternative secure free-hosting/image-distribution design needs separate review. Stay local if zero cloud spend is mandatory and no verified design meets it.
 
@@ -107,6 +107,18 @@ Choose paid growth when measured usage or requirements justify it: allowance exh
 Public visitor-session creation intentionally has no app-level admission throttle or active-session cap. Popularity should prompt usage review and an explicitly approved move to paid capacity, not an automatic visitor block or billing change. Per-session data/mutation limits still apply. Automated traffic can consume allowances too; this policy is not a spending cap or an availability guarantee. Free-tier SQL still pauses when its configured allowance is exhausted. These commands do not implement usage monitoring or automatically upgrade the application.
 
 The zero-to-one replica limit bounds app capacity, not total cost. An authenticated real-data application needs its separate [production deployment review](deployment.md); never expose real sensitive data anonymously to achieve a cheaper demo.
+
+## Compare the hosting candidates
+
+The Static Web Apps option adds a Standard plan for static delivery and keeps one linked Container App for the Node API and internal DAB. It does not replace ACR, networking, SQL or Container Apps, so it is likely not cheaper than the current Container Apps default.
+
+After recording current regional/account prices and measured workload usage in a local comparison configuration, run:
+
+```powershell
+npm run azure -- hosting-compare azure-demo-hosting-comparison.json
+```
+
+Compare both options using the same evidence date, region, currency, requests, transfer and active-backend hours. Unknown prices remain unknown rather than zero. `container-apps` remains recommended when the Static Web Apps total is higher or live acceptance is false. `static-web-apps` can be recommended only when its measured total is no greater and live acceptance is true. The report does not deploy resources or change the default; record and review the evidence separately.
 
 ## Sources to recheck before deployment
 

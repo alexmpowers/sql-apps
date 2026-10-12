@@ -112,6 +112,35 @@ test('retention cannot delete a timed-out job while its worker holds the snapsho
   assert.equal(snapshotDeleted, false);
 });
 
+test('stale recovery skips a job while its worker holds the snapshot lease', async t => {
+  const oid = '22222222-2222-4222-8222-222222222222';
+  const row = fileJobSchema.parse({
+    id: '11111111-1111-4111-8111-111111111111', filename: 'sample.txt', status: 'processing',
+    sha256: null, byte_count: null, line_count: null, error: null, updated_at: '2026-10-08T11:00:00Z',
+  });
+  let updated = false;
+  const jobs = localJobData('http://127.0.0.1:15000', async (_url, options) => {
+    if (options?.method === 'PATCH') updated = true;
+    return Response.json({ value: [row] });
+  });
+  const files = new ContainerClient('https://storage.invalid/files');
+  const traces = new ContainerClient('https://storage.invalid/traces');
+  const snapshot = files.getBlockBlobClient(`${localTenantId}/${oid}/jobs/${row.id}`);
+  const lease = snapshot.getBlobLeaseClient();
+  const conflict = Object.assign(new Error('Snapshot is leased by a live worker'), {
+    statusCode: 409, code: 'LeaseAlreadyPresent',
+  });
+  t.mock.method(files, 'getBlockBlobClient', () => snapshot);
+  t.mock.method(snapshot, 'getBlobLeaseClient', () => lease);
+  t.mock.method(lease, 'acquireLease', async () => { throw conflict; });
+  t.mock.method(files, 'listBlobsFlat', async function* () {});
+  t.mock.method(traces, 'listBlobsFlat', async function* () {});
+  const result = await maintainLocalJobs(jobs, files, traces, localSettingsSchema.parse({}),
+    Date.parse('2026-10-10T12:00:00Z'), [oid]);
+  assert.equal(updated, false);
+  assert.equal(result.recovered, 0);
+});
+
 test('progress polling never overlaps, pauses while unavailable, backs off and cancels', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let calls = 0;

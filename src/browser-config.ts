@@ -1,3 +1,5 @@
+export const authRedirectPath = '/auth/redirect.html';
+
 export interface BrowserCapabilities {
   files: boolean;
   functions: boolean;
@@ -10,8 +12,8 @@ export interface BrowserCapabilities {
 }
 
 export type BrowserConfig =
-  | { mode: 'entra'; tenantId: string; clientId: string; scope: string; capabilities: BrowserCapabilities }
-  | { mode: 'local'; users: { id: string; name: string }[]; capabilities: BrowserCapabilities };
+  | { mode: 'entra'; tenantId: string; clientId: string; scope: string; localBackend?: boolean; capabilities: BrowserCapabilities }
+  | { mode: 'local'; capabilities: BrowserCapabilities };
 
 export function parseBrowserConfig(value: unknown): BrowserConfig {
   if (!value || typeof value !== 'object') throw new Error('Invalid browser configuration');
@@ -39,18 +41,14 @@ export function parseBrowserConfig(value: unknown): BrowserConfig {
         capabilities.progressIntervalMs < 1000 || capabilities.progressIntervalMs > 30000) throw new Error('Invalid progress interval');
     Object.assign(services, { progressIntervalMs: capabilities.progressIntervalMs });
   }
-  if ('mode' in value && value.mode === 'local' && 'users' in value && Array.isArray(value.users) && value.users.length > 0) {
-    const users = value.users.map((user: unknown) => {
-      if (!user || typeof user !== 'object' || !('id' in user) || typeof user.id !== 'string' || !user.id ||
-          !('name' in user) || typeof user.name !== 'string' || !user.name) throw new Error('Invalid development users');
-      return { id: user.id, name: user.name };
-    });
-    return { mode: 'local', users, capabilities: services };
-  }
+  if ('mode' in value && value.mode === 'local') return { mode: 'local', capabilities: services };
   if ((legacyEntra || ('mode' in value && value.mode === 'entra')) && 'tenantId' in value && typeof value.tenantId === 'string' && value.tenantId &&
       'clientId' in value && typeof value.clientId === 'string' && value.clientId &&
       'scope' in value && typeof value.scope === 'string' && value.scope) {
-    return { mode: 'entra', tenantId: value.tenantId, clientId: value.clientId, scope: value.scope, capabilities: services };
+    const localBackend = 'localBackend' in value ? value.localBackend : undefined;
+    if ('localBackend' in value && typeof localBackend !== 'boolean') throw new Error('Invalid local backend configuration');
+    return { mode: 'entra', tenantId: value.tenantId, clientId: value.clientId, scope: value.scope,
+      ...(typeof localBackend === 'boolean' ? { localBackend } : {}), capabilities: services };
   }
   throw new Error('Invalid browser authentication configuration');
 }

@@ -1,8 +1,41 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TodoExampleClient } from '../examples/todo/client.js';
-import { ApiError } from '../src/client.js';
-import { smoke } from '../examples/todo/smoke.js';
+import { TodoExampleClient } from '../client.js';
+import { ApiError } from '../../../src/client.js';
+import { smoke } from '../smoke.js';
+
+test('authenticated Todo writes reject invalid SQL-width titles before HTTP', async () => {
+  const bodies: unknown[] = [];
+  const id = '11111111-1111-4111-8111-111111111111';
+  const client = new TodoExampleClient({
+    baseUrl: 'https://app.example', getAccessToken: async () => 'token',
+    fetch: async (_url, options) => {
+      bodies.push(JSON.parse(String(options?.body)));
+      return new Response(null, { status: 204 });
+    },
+  });
+  for (const title of ['', '   ', 'x'.repeat(201), String.fromCodePoint(0x1F33F).repeat(100) + 'x']) {
+    await assert.rejects(client.createTodo(title, id));
+    await assert.rejects(client.updateTodo(id, { title }));
+  }
+  assert.equal(bodies.length, 0);
+  const title = String.fromCodePoint(0x1F33F).repeat(100);
+  await client.createTodo(` ${title} `, id);
+  await client.updateTodo(id, { title: ` ${title} ` });
+  assert.deepEqual(bodies, [{ id, title }, { title }]);
+});
+
+test('authenticated Todo reads reject titles exceeding the SQL UTF-16 limit', async () => {
+  for (const title of ['', 'x'.repeat(201), String.fromCodePoint(0x1F33F).repeat(100) + 'x']) {
+    const client = new TodoExampleClient({
+      baseUrl: 'https://app.example', getAccessToken: async () => 'token',
+      fetch: async () => Response.json({ value: [{
+        id: '11111111-1111-4111-8111-111111111111', title, completed: false,
+      }] }),
+    });
+    await assert.rejects(client.listTodos(), /invalid Todo/);
+  }
+});
 
 test('client attaches token, validates payload, and rejects cross-origin routes', async () => {
   let tokenHeader: string | null = null;
@@ -111,7 +144,7 @@ test('file and processing client methods validate output and preserve exact requ
         sha256: null, byte_count: null, line_count: null, error: null }] });
     },
   });
-  assert.deepEqual(await client.listFiles(), [{ name: 'note.txt', size: 12 }]);
+  assert.deepEqual(await client.listFiles(), { files: [{ name: 'note.txt', size: 12 }] });
   assert.equal((await client.listJobs())[0]?.id, id);
   assert.equal(await client.processFile('note.txt'), id);
   await client.deleteJob(id);
@@ -124,6 +157,28 @@ test('file and processing client methods validate output and preserve exact requ
       fetch: async () => Response.json(value) });
     await assert.rejects('files' in value ? invalid.listFiles() : invalid.listJobs());
   }
+});
+test('file client loads bounded storage pages only when requested', async () => {
+  const requests: string[] = [];
+  const client = new TodoExampleClient({
+    baseUrl: 'https://app.example', getAccessToken: async () => 'token',
+    fetch: async url => {
+      const request = new URL(String(url));
+      requests.push(request.pathname + request.search);
+      return request.search
+        ? Response.json({ files: [{ name: 'second.txt', size: 2 }] })
+        : Response.json({ files: [{ name: 'first.txt', size: 1 }], continuationToken: 'next page' });
+    },
+  });
+  const first = await client.listFiles();
+  assert.deepEqual(first, {
+    files: [{ name: 'first.txt', size: 1 }], continuationToken: 'next page',
+  });
+  assert.deepEqual(requests, ['/storage']);
+  assert.deepEqual(await client.listFiles(first.continuationToken), {
+    files: [{ name: 'second.txt', size: 2 }],
+  });
+  assert.deepEqual(requests, ['/storage', '/storage?continuationToken=next+page']);
 });
 test('acceptance succeeds with isolated dependencies and cleans up its fixtures', async () => {
   const rows = new Map<string, { id: string; title: string; completed: boolean; owner: string }>();

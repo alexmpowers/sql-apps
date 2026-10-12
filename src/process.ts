@@ -6,6 +6,7 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   input?: string;
   redact?: readonly string[];
+  sensitiveOutput?: boolean;
 }
 export type Run = (command: string, args: readonly string[], options?: RunOptions) => Promise<string>;
 
@@ -23,7 +24,7 @@ function execute(command: string, args: readonly string[], env = process.env, op
     child.once('error', reject);
     child.once('close', (code, signal) => {
       if (code !== 0) {
-        let message = stderr.trim() || stdout.trim();
+        let message = options.sensitiveOutput ? 'sensitive command output omitted' : stderr.trim() || stdout.trim();
         for (const arg of args) {
           if (arg.startsWith('/AccessToken:')) message = message.replaceAll(arg.slice('/AccessToken:'.length), '[REDACTED]');
         }

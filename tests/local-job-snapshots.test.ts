@@ -27,11 +27,16 @@ function fixture(t: TestContext) {
   t.mock.method(blob, 'getBlobLeaseClient', () => {
     const lease = getLease();
     t.mock.method(lease, 'acquireLease', async (duration: number) => {
-      assert.equal(duration, -1);
+      assert.equal(duration, 60);
       if (!exists) throw missing;
       if (held) throw Object.assign(new Error('Worker owns snapshot'), { code: 'LeaseAlreadyPresent', statusCode: 409 });
       held = lease.leaseId;
       calls.push('acquire');
+      return { leaseId: held };
+    });
+    t.mock.method(lease, 'renewLease', async () => {
+      assert.equal(held, lease.leaseId);
+      calls.push('renew');
       return { leaseId: held };
     });
     t.mock.method(lease, 'releaseLease', async () => {
@@ -79,6 +84,20 @@ test('a timed-out worker retains exclusive snapshot protection until it finishes
   assert.equal(state.held(), undefined);
   assert.equal(await state.remove(), true);
   assert.deepEqual(state.calls, ['acquire', 'release', 'acquire', 'sql-delete', 'blob-delete', 'release']);
+});
+
+test('a live worker renews its finite snapshot lease', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const state = fixture(t);
+  let finish!: () => void;
+  const work = withJobSnapshotLease(state.blob, () => new Promise<void>(resolve => { finish = resolve; }));
+  await Promise.resolve();
+  t.mock.timers.tick(30_000);
+  await Promise.resolve();
+  assert.deepEqual(state.calls, ['acquire', 'renew']);
+  finish();
+  await work;
+  assert.deepEqual(state.calls, ['acquire', 'renew', 'release']);
 });
 
 test('snapshot lease releases after a worker error and preserves its error', async t => {

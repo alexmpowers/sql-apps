@@ -11,6 +11,11 @@ param runtimeIdentityName string
 param registryName string
 param sqlServerName string
 param databaseName string
+@description('Explicit supported Azure Static Web Apps resource location. This can differ from the Container Apps backend region.')
+param staticWebAppLocation string
+@minLength(3)
+@maxLength(40)
+param staticWebAppName string
 @description('Approved selected gateway image pinned to its immutable sha256 digest.')
 param gatewayImage string
 @description('Approved selected DAB configuration image pinned to its immutable sha256 digest.')
@@ -35,7 +40,21 @@ resource sql 'Microsoft.Sql/servers@2023-08-01' existing = {
   name: sqlServerName
 }
 
-var origin = 'https://${applicationName}.${environment.properties.defaultDomain}'
+resource staticSite 'Microsoft.Web/staticSites@2023-12-01' = {
+  name: staticWebAppName
+  location: staticWebAppLocation
+  tags: ownedTags
+  sku: {
+    name: 'Standard'
+    tier: 'Standard'
+  }
+  properties: {
+    allowConfigFileUpdates: true
+    stagingEnvironmentPolicy: 'Disabled'
+  }
+}
+
+var publicOrigin = 'https://${staticSite.properties.defaultHostname}'
 
 resource app 'Microsoft.App/containerApps@2024-03-01' = {
   name: applicationName
@@ -65,7 +84,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'NODE_ENV', value: 'production' }
             { name: 'PORT', value: '8080' }
             { name: 'SQL_APPS_PROFILE', value: 'public-demo' }
-            { name: 'PUBLIC_ORIGIN', value: origin }
+            { name: 'PUBLIC_ORIGIN', value: publicOrigin }
             { name: 'DAB_URL', value: 'http://127.0.0.1:5000' }
           ]
           probes: [
@@ -88,6 +107,16 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+resource linkedBackend 'Microsoft.Web/staticSites/linkedBackends@2023-12-01' = {
+  parent: staticSite
+  name: 'linkedBackend'
+  properties: {
+    backendResourceId: app.id
+    region: location
+  }
+}
+
 output applicationId string = app.id
-output gatewayUrl string = origin
-output ingressHost string = app.properties.configuration.ingress.fqdn
+output publicUrl string = publicOrigin
+output backendUrl string = 'https://${app.properties.configuration.ingress.fqdn}'
+output staticWebAppName string = staticSite.name

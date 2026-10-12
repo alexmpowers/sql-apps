@@ -12,6 +12,7 @@ const inputFiles = ['package.json', 'package-lock.json', 'application.json', 'ru
   'functions/package.json', 'functions/local-package.json', 'functions/host.json', 'functions/local-host.json',
   '.config/dotnet-tools.json'];
 const extensions = new Set(['.ts', '.mts', '.js', '.mjs', '.json', '.sql', '.sqlproj', '.html', '.css', '.bicep']);
+const browserArtifacts = [join('public', 'app.js'), join('public', 'auth', 'redirect.js')];
 
 async function fingerprint(home, directories, files = [], source = false) {
   const entries = [];
@@ -27,7 +28,7 @@ async function fingerprint(home, directories, files = [], source = false) {
         await visit(join(relative, entry));
       }
     } else if (!source || extensions.has(extname(path)) || path.endsWith('Dockerfile')) {
-      if (source && relative === join('public', 'app.js')) return;
+      if (source && browserArtifacts.includes(relative)) return;
       const hash = createHash('sha256').update(await readFile(path)).digest('hex');
       entries.push([relative.replaceAll('\\', '/'), hash]);
     }
@@ -70,21 +71,21 @@ async function inspectBuild(home, sourceFingerprint) {
   let metadata;
   try { metadata = JSON.parse(await readFile(join(home, 'dist', 'build-provenance.json'), 'utf8')); }
   catch (error) {
-    if (error.code === 'ENOENT') return { ready: false, code: 'BUILD_UNVERIFIED', nextAction: 'Run npm run build in the explicitly selected checkout.' };
+    if (error.code === 'ENOENT') return { ready: false, code: 'BUILD_UNVERIFIED', nextAction: 'No verified build; after approval, use consent-run build (the guarded build) in this checkout.' };
     return { ready: false, code: 'BUILD_METADATA_INVALID', nextAction: 'Review build metadata, then rebuild the selected checkout.' };
   }
   if (metadata.version !== 1 || metadata.home !== home || typeof metadata.sourceFingerprint !== 'string' ||
       typeof metadata.artifactFingerprint !== 'string' || typeof metadata.builtAt !== 'string' ||
       !Number.isFinite(Date.parse(metadata.builtAt)) ||
       Object.keys(metadata).some(key => !['version', 'home', 'sourceFingerprint', 'artifactFingerprint', 'builtAt'].includes(key))) {
-    return { ready: false, code: 'BUILD_METADATA_INVALID', nextAction: 'Build provenance is invalid or belongs to another checkout; rebuild here.' };
+    return { ready: false, code: 'BUILD_METADATA_INVALID', nextAction: 'Build provenance is invalid or belongs to another checkout; after approval, use consent-run build (the guarded build) in this checkout.' };
   }
   if (metadata.sourceFingerprint !== sourceFingerprint) {
-    return { ready: false, code: 'BUILD_SOURCE_MISMATCH', nextAction: 'Source changed after the build; run npm run build here.' };
+    return { ready: false, code: 'BUILD_SOURCE_MISMATCH', nextAction: 'Source changed after the build; after approval, use consent-run build (the guarded build) in this checkout.' };
   }
-  const artifacts = await fingerprint(home, ['dist/src', 'dist/functions', 'dist/scripts'], ['public/app.js']);
+  const artifacts = await fingerprint(home, ['dist/src', 'dist/functions', 'dist/scripts'], browserArtifacts);
   if (artifacts.hash !== metadata.artifactFingerprint || artifacts.files === 0) {
-    return { ready: false, code: 'BUILD_ARTIFACT_MISMATCH', nextAction: 'Runtime artifacts changed or are missing; rebuild here.' };
+    return { ready: false, code: 'BUILD_ARTIFACT_MISMATCH', nextAction: 'Runtime artifacts changed or are missing; after approval, use consent-run build (the guarded build) in this checkout.' };
   }
   return { ready: true, code: 'BUILD_CURRENT', artifactFingerprint: artifacts.hash, builtAt: metadata.builtAt };
 }
@@ -164,7 +165,7 @@ export async function recordBuild(value, expectedFingerprint) {
   const source = await inspectSource(value);
   if (!source.ready) throw new Error(`Cannot record build provenance: ${source.code}`);
   if (expectedFingerprint && expectedFingerprint !== source.fingerprint) throw new Error('Source changed during build; rebuild before running the application');
-  const artifacts = await fingerprint(source.home, ['dist/src', 'dist/functions', 'dist/scripts'], ['public/app.js']);
+  const artifacts = await fingerprint(source.home, ['dist/src', 'dist/functions', 'dist/scripts'], browserArtifacts);
   if (artifacts.files === 0) throw new Error('No runtime artifacts to record');
   const target = join(source.home, 'dist', 'build-provenance.json');
   const temporary = `${target}.${randomUUID()}.tmp`;

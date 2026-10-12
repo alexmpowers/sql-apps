@@ -98,7 +98,8 @@ IF DB_ID(N'${target.database}') IS NULL CREATE DATABASE [${target.database}];
 IF SUSER_ID(N'${target.login}') IS NULL CREATE LOGIN [${target.login}] WITH PASSWORD=N'${state.password}';
 `, runner, [state.password]);
     await publishLocalSchema(runtime.sqlContainer, { database: target.database,
-      project: join(directory, 'sql', 'database.sqlproj'), output: target.compiled, intermediate: target.intermediate }, runner);
+      project: join(directory, 'sql', 'database.sqlproj'), output: target.compiled, intermediate: target.intermediate,
+      runPostDeploy: true }, runner);
     const grants = (await readFile(join(directory, 'setup', 'grants.sql'), 'utf8')).replaceAll('$(ApplicationUser)', target.login);
     await localAdminQuery(runtime.sqlContainer, target.database,
       `IF DATABASE_PRINCIPAL_ID(N'${target.login}') IS NULL CREATE USER [${target.login}] FOR LOGIN [${target.login}];\n${grants}`,

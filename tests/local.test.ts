@@ -1,9 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { localCommand, localConnection, localDabConfig, localPrincipal, verifyLocal, startLocalSql } from '../src/local.js';
+import { localCommand, localConnection, localDabConfig, localPrincipal, verifyLocal, startLocalSql, sqlImage, dabImage } from '../src/local.js';
 import { run, type Run } from '../src/process.js';
 import { startLocalApplication } from '../src/local-startup.js';
+import { runtimeFor, type WorkspaceRuntime } from '../src/workspace.mjs';
+import { localWorkspaceFixture } from './local-workspace-fixture.js';
+
+function sqlOwnership(runtime: WorkspaceRuntime, args: readonly string[]): string | undefined {
+  if (args[0] === 'volume' || args[0] === 'network') {
+    const name = args[0] === 'volume' ? `${runtime.sqlContainer}-data` : runtime.names.sqlNetwork;
+    assert.ok(args.includes(name) || args.includes(`name=^${name}$`));
+    if (args[1] === 'ls') return name;
+    assert.equal(args[1], 'inspect');
+    return JSON.stringify({ workspace: runtime.id, role: args[0] === 'volume' ? 'sql' : 'sql-network' });
+  }
+  if (args[0] === 'inspect') {
+    if (args.some(arg => arg.includes('HostConfig.PortBindings'))) return JSON.stringify({
+      workspace: runtime.id, image: sqlImage,
+      ports: { '1433/tcp': [{ HostIp: '127.0.0.1', HostPort: String(runtime.ports.sql) }] },
+    });
+    if (args.includes('{{json .Mounts}}')) return JSON.stringify([
+      { Type: 'volume', Name: `${runtime.sqlContainer}-data`, Destination: '/var/opt/mssql' },
+    ]);
+  }
+  return undefined;
+}
 
 test('guided startup reports each existing stage, stops on failure and preserves the error cause', async () => {
   const expected = ['start-sql', 'init', 'data', 'services', 'serve'];
@@ -34,11 +56,11 @@ test('guided startup reports each existing stage, stops on failure and preserves
   }
 });
 
-test('actual application CLI fails nonzero at the named SQL stage before invalid input can start services', async () => {
+test('actual application CLI rejects invalid input during preflight before startup can change services', async () => {
   await assert.rejects(run(process.execPath, ['dist/src/local-cli.js', 'app', 'bad;container'], {
     env: { NODE_ENV: 'development' },
   }), error => error instanceof Error && /failed \(1\)/.test(error.message) &&
-    /startup stopped at SQL container/.test(error.message) && /Invalid SQL container name/.test(error.message));
+    /Invalid SQL container name/.test(error.message) && !/Starting SQL container/.test(error.message));
 });
 
 test('local workflow fails closed on SQL Server instead of Azure SQL', async () => {
@@ -75,9 +97,10 @@ test('local DAB uses production entities and RLS with separate claim simulation 
 });
 
 test('local app connection is encrypted and is not the SA bootstrap login', () => {
+  const runtime = runtimeFor();
   const connection = localConnection('quotes";semicolon', '127.0.0.1,1434');
-  assert.match(connection, /Database=sql_apps_local;/);
-  assert.match(connection, /User Id=sql_apps_local_dab;/);
+  assert.ok(connection.includes(`Database=${runtime.database};`));
+  assert.ok(connection.includes(`User Id=${runtime.login};`));
   assert.match(connection, /Encrypt=True;TrustServerCertificate=True;/);
   assert.match(connection, /Password="quotes"";semicolon";/);
   assert.equal(connection.includes('User Id=sa'), false);
@@ -89,113 +112,155 @@ test('local test principal carries owner and scope without tenant infrastructure
     [{ typ: 'oid', val: 'alice' }, { typ: 'scp', val: 'access_as_user' }]);
 });
 
-test('starting SQL binds loopback, uses durable volume, and avoids password command arguments', async () => {
-  const calls: string[][] = [];
-  const runner: Run = async (_command, args, options) => {
-    calls.push([...args]);
-    if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: 'running' });
-    if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
-    if (args[0] === 'run') {
-      assert.ok(options?.env?.MSSQL_SA_PASSWORD);
-      assert.match(options.env!.MSSQL_SA_PASSWORD!, /^SqlApps1![a-f0-9]{64}$/);
-      assert.equal(args.some(value => value.includes(options.env!.MSSQL_SA_PASSWORD!)), false);
-      assert.equal(args.includes('127.0.0.1::1433'), true);
-      assert.equal(args.includes('type=volume,source=test-sql-data,target=/var/opt/mssql'), true);
-      assert.equal(args.includes('sql-apps.local=sql'), true);
-    }
-    return args[0] === 'exec' ? '5|SQL Azure' : '';
-  };
-  await startLocalSql('test-sql', runner);
-  assert.equal(calls.filter(call => call[0] === 'run').length, 1);
-});
-
-test('start-sql never overwrites or restarts someone else\'s container', async () => {
-  const calls: string[][] = [];
-  await assert.rejects(startLocalSql('existing', async (_command, args) => {
-    calls.push([...args]);
-    return args[0] === 'ps' ? 'existing' : '';
-  }), /already in use/);
-  assert.equal(calls.some(call => ['run', 'start', 'rm'].includes(call[0]!)), false);
-});
-
-test('local stop refuses unowned containers and removes only a verified data container', async () => {
-  const calls: string[][] = [];
-  await assert.rejects(localCommand('stop', 'existing', async (_command, args) => {
-    calls.push([...args]);
-    return '';
-  }), /ownership label/);
-  assert.equal(calls.some(call => call[0] === 'rm'), false);
-  calls.length = 0;
-  await localCommand('stop', 'existing', async (_command, args) => {
-    calls.push([...args]);
-    return args[0] === 'inspect' ? 'data' : '';
+for (const selection of ['legacy', 42000] as const) {
+  const mode = selection === 'legacy' ? 'legacy' : 'isolated';
+  test(`starting SQL binds loopback, uses durable volume, and avoids password command arguments (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    const calls: string[][] = [];
+    const runner: Run = async (_command, args, options) => {
+      calls.push([...args]);
+      if (args[0] === 'ps') return '';
+      if (args[0] === 'volume' || args[0] === 'network') {
+        if (args[1] === 'ls') return '';
+        assert.equal(args[1], 'create');
+        assert.ok(args.includes(`sql-apps.workspace=${runtime.id}`));
+        return '';
+      }
+      if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: 'running' });
+      if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
+      if (args[0] === 'run') {
+        const password = options?.env?.MSSQL_SA_PASSWORD;
+        assert.ok(password);
+        assert.match(password, /^SqlApps1![a-f0-9]{64}$/);
+        assert.equal(args.some(value => value.includes(password)), false);
+        assert.equal(args.includes(`127.0.0.1:${runtime.ports.sql ?? ''}:1433`), true);
+        assert.equal(args.includes(`type=volume,source=${runtime.sqlContainer}-data,target=/var/opt/mssql`), true);
+        assert.equal(args.includes('sql-apps.local=sql'), true);
+        if (runtime.mode === 'isolated') assert.ok(args.includes(`sql-apps.workspace=${runtime.id}`));
+        return '';
+      }
+      if (args[0] === 'exec') return '5|SQL Azure';
+      assert.fail(`Unexpected fixture command: ${args.join(' ')}`);
+    };
+    await startLocalSql(runtime.sqlContainer, runner);
+    assert.equal(calls.filter(call => call[0] === 'run').length, 1);
   });
-  assert.equal(calls.length, 2);
-  assert.equal(calls[1]?.[0], 'rm');
-  assert.equal(calls[1]?.[1], '--force');
-  assert.match(calls[1]?.[2] ?? '', /^sql-apps-local-data-[a-f0-9]{12}$/);
-});
 
-test('local start reuses project SQL without recreating its volume or resetting credentials', async () => {
-  const calls: string[][] = [];
-  await startLocalSql('owned-sql', async (_command, args) => {
-    calls.push([...args]);
-    if (args[0] === 'ps') return 'owned-sql';
-    if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: 'running' });
-    if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
-    if (args[0] === 'inspect') return 'sql';
-    return args[0] === 'exec' ? '5|SQL Azure' : '';
+  test(`start-sql never overwrites or restarts someone else's container (${mode})`, async t => {
+    await localWorkspaceFixture(t, selection);
+    const calls: string[][] = [];
+    await assert.rejects(startLocalSql('existing', async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === 'ps') return 'existing';
+      assert.equal(args[0], 'inspect');
+      return '';
+    }), /already in use/);
+    assert.equal(calls.some(call => ['run', 'start', 'rm'].includes(call[0]!)), false);
   });
-  assert.deepEqual(calls.map(call => call[0]), ['ps', 'inspect', 'start', 'inspect', 'exec', 'exec']);
-});
 
-test('SQL startup retries the preview recovery race and waits for control-plane completion', async () => {
-  let stateChecks = 0;
-  let starts = 0;
-  const runner: Run = async (_command, args) => {
-    if (args[0] === 'ps') return 'owned-sql';
-    if (args.includes('{{json .State}}')) return JSON.stringify({
-      StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: stateChecks++ === 0 ? 'exited' : 'running',
+  test(`local stop refuses unowned containers and removes only a verified data container (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    const calls: string[][] = [];
+    await assert.rejects(localCommand('stop', runtime.sqlContainer, async (_command, args) => {
+      calls.push([...args]);
+      return '';
+    }), /ownership label/);
+    assert.equal(calls.some(call => call[0] === 'rm'), false);
+    calls.length = 0;
+    await localCommand('stop', runtime.sqlContainer, async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === 'inspect') {
+        if (args.some(arg => arg.includes('HostConfig.PortBindings'))) return JSON.stringify({
+          workspace: runtime.id, image: dabImage,
+          ports: { '5000/tcp': [{ HostIp: '127.0.0.1', HostPort: String(runtime.ports.data) }] },
+        });
+        assert.ok(args.includes('{{index .Config.Labels "sql-apps.local"}}'));
+        return 'data';
+      }
+      assert.deepEqual(args, ['rm', '--force', runtime.names.data]);
+      return '';
     });
-    if (args[0] === 'inspect') return 'sql';
-    if (args[0] === 'start') starts++;
-    if (args[0] === 'logs') return 'Msg904,Database32760cannotbeautostartedduringstartup. Reconcile finished with 1 failure(s).';
-    if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
-    return args[0] === 'exec' ? '5|SQL Azure' : '';
-  };
-  await startLocalSql('owned-sql', runner);
-  assert.equal(starts, 2);
-  assert.equal(stateChecks, 2);
-});
-
-test('SQL startup bounds recovery retries and never bypasses control-plane initialization', async () => {
-  let starts = 0;
-  await assert.rejects(startLocalSql('owned-sql', async (_command, args) => {
-    if (args[0] === 'ps') return 'owned-sql';
-    if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date().toISOString(), Status: 'exited' });
-    if (args[0] === 'inspect') return 'sql';
-    if (args[0] === 'start') { starts++; return ''; }
-    if (args[0] === 'logs') return 'Reconcile finished with 1 failure(s). Database cannot be autostarted.';
-    assert.fail('Exited SQL should never proceed to database queries');
-  }), /SQL container exited/);
-  assert.equal(starts, 4);
-});
-
-test('SQL startup rejects a stale readiness marker from a previous boot', async () => {
-  const started = Date.now() - 10_000;
-  let markerChecks = 0;
-  let engineChecks = 0;
-  await startLocalSql('owned-sql', async (_command, args) => {
-    if (args[0] === 'ps') return 'owned-sql';
-    if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(started).toISOString(), Status: 'running' });
-    if (args[0] === 'inspect') return 'sql';
-    if (args.some(value => value.includes('stat -c %Y'))) {
-      assert.equal(engineChecks, 0);
-      return String(Math.floor((markerChecks++ === 0 ? started - 5_000 : Date.now()) / 1_000));
-    }
-    if (args[0] === 'exec') { engineChecks++; return '5|SQL Azure'; }
-    return '';
+    assert.deepEqual(calls.filter(call => call[0] === 'rm'), [['rm', '--force', runtime.names.data]]);
   });
-  assert.equal(markerChecks, 2);
-  assert.equal(engineChecks, 1);
-});
+
+  test(`local start reuses project SQL without recreating its volume or resetting credentials (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    const calls: string[][] = [];
+    await startLocalSql(runtime.sqlContainer, async (_command, args) => {
+      calls.push([...args]);
+      const ownership = sqlOwnership(runtime, args);
+      if (ownership !== undefined) return ownership;
+      if (args[0] === 'ps') return runtime.sqlContainer;
+      if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: 'running' });
+      if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
+      if (args.includes('{{index .Config.Labels "sql-apps.local"}}')) return 'sql';
+      if (args[0] === 'exec') return '5|SQL Azure';
+      assert.deepEqual(args, ['start', runtime.sqlContainer]);
+      return '';
+    });
+    assert.deepEqual(calls.filter(call => ['run', 'start', 'rm'].includes(call[0]!)), [['start', runtime.sqlContainer]]);
+    assert.ok(calls.every(call => !['volume', 'network'].includes(call[0]!) || ['ls', 'inspect'].includes(call[1]!)));
+  });
+
+  test(`SQL startup retries the preview recovery race and waits for control-plane completion (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    let stateChecks = 0;
+    let starts = 0;
+    const runner: Run = async (_command, args) => {
+      const ownership = sqlOwnership(runtime, args);
+      if (ownership !== undefined) return ownership;
+      if (args[0] === 'ps') return runtime.sqlContainer;
+      if (args.includes('{{json .State}}')) return JSON.stringify({
+        StartedAt: new Date(Date.now() - 10_000).toISOString(), Status: stateChecks++ === 0 ? 'exited' : 'running',
+      });
+      if (args.includes('{{index .Config.Labels "sql-apps.local"}}')) return 'sql';
+      if (args[0] === 'start') { starts++; return ''; }
+      if (args[0] === 'logs') return 'Msg904,Database32760cannotbeautostartedduringstartup. Reconcile finished with 1 failure(s).';
+      if (args.some(value => value.includes('stat -c %Y'))) return String(Math.floor(Date.now() / 1_000));
+      if (args[0] === 'exec') return '5|SQL Azure';
+      assert.fail(`Unexpected fixture command: ${args.join(' ')}`);
+    };
+    await startLocalSql(runtime.sqlContainer, runner);
+    assert.equal(starts, 2);
+    assert.equal(stateChecks, 2);
+  });
+
+  test(`SQL startup bounds recovery retries and never bypasses control-plane initialization (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    let starts = 0;
+    await assert.rejects(startLocalSql(runtime.sqlContainer, async (_command, args) => {
+      const ownership = sqlOwnership(runtime, args);
+      if (ownership !== undefined) return ownership;
+      if (args[0] === 'ps') return runtime.sqlContainer;
+      if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date().toISOString(), Status: 'exited' });
+      if (args.includes('{{index .Config.Labels "sql-apps.local"}}')) return 'sql';
+      if (args[0] === 'start') { starts++; return ''; }
+      if (args[0] === 'logs') return 'Reconcile finished with 1 failure(s). Database cannot be autostarted.';
+      assert.fail('Exited SQL should never proceed to database queries');
+    }), /SQL container exited/);
+    assert.equal(starts, 4);
+  });
+
+  test(`SQL startup rejects a stale readiness marker from a previous boot (${mode})`, async t => {
+    const runtime = await localWorkspaceFixture(t, selection);
+    const started = Date.now() - 10_000;
+    let markerChecks = 0;
+    let engineChecks = 0;
+    await startLocalSql(runtime.sqlContainer, async (_command, args) => {
+      const ownership = sqlOwnership(runtime, args);
+      if (ownership !== undefined) return ownership;
+      if (args[0] === 'ps') return runtime.sqlContainer;
+      if (args.includes('{{json .State}}')) return JSON.stringify({ StartedAt: new Date(started).toISOString(), Status: 'running' });
+      if (args.includes('{{index .Config.Labels "sql-apps.local"}}')) return 'sql';
+      if (args.some(value => value.includes('stat -c %Y'))) {
+        assert.equal(engineChecks, 0);
+        return String(Math.floor((markerChecks++ === 0 ? started - 5_000 : Date.now()) / 1_000));
+      }
+      if (args[0] === 'exec') { engineChecks++; return '5|SQL Azure'; }
+      assert.deepEqual(args, ['start', runtime.sqlContainer]);
+      return '';
+    });
+    assert.equal(markerChecks, 2);
+    assert.equal(engineChecks, 1);
+  });
+}

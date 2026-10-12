@@ -10,25 +10,39 @@ import { run } from '../src/process.js';
 async function fixture() {
   await mkdir('.sql-apps', { recursive: true });
   const home = await mkdtemp(resolve('.sql-apps', 'selected-build-test-'));
-  for (const dir of ['src', 'sql', 'plugins/sql-apps', 'examples/inventory/web', 'examples/inventory/demo']) {
+  for (const dir of [
+    'src', 'sql', 'public', 'plugins/sql-apps',
+    'examples/inventory/web', 'examples/inventory/demo', 'examples/inventory/tests',
+  ]) {
     await mkdir(join(home, dir), { recursive: true });
   }
   await writeFile(join(home, 'package.json'), await readFile('package.json'));
   await writeFile(join(home, 'package-lock.json'), await readFile('package-lock.json'));
   await writeFile(join(home, 'application.json'), JSON.stringify({ name: 'clean', selectedExamples: [] }));
   await writeFile(join(home, 'runtime-contract.json'), JSON.stringify({ version: 1, capabilities: ['local', 'setup-check'] }));
+  await writeFile(join(home, 'public', 'staticwebapp.config.json'), JSON.stringify({
+    routes: [{ route: '/api/*', allowedRoles: ['anonymous'] }],
+    navigationFallback: { rewrite: '/index.html', exclude: ['/api/*'] },
+    globalHeaders: {
+      'cache-control': 'no-store',
+      'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      'referrer-policy': 'no-referrer',
+      'x-content-type-options': 'nosniff',
+    },
+  }));
   for (const file of ['application.ts', 'demo-app.ts', 'demo-session.ts', 'workspace.mjs']) await cp(resolve('src', file), join(home, 'src', file));
   for (const file of ['src/local-cli.ts', 'sql/database.sqlproj', 'plugins/sql-apps/plugin.json']) await writeFile(join(home, file), '');
   await writeFile(join(home, 'examples/inventory/application.ts'), `
 import { type ApplicationDefinition } from '../../src/application.js';
 export const application: ApplicationDefinition = {
   name: 'inventory', capabilities: ['data', 'visitor-sessions'], profiles: ['local-simulation', 'public-demo'],
-  routes: [{method:'GET',path:'/inventory'}],
+  routes: [{method:'GET',path:'/api/inventory'}],
   inputs:{browser:'web/app.ts',html:'web/index.html',css:'web/app.css',sqlProject:'demo/database.sqlproj',
-    sqlFiles:['demo/schema.sql'],grants:'demo/grants.sql',dab:'demo/dab-config.json'},
+    sqlFiles:['demo/schema.sql'],grants:'demo/grants.sql',dab:'demo/dab-config.json',
+    publicAcceptance:'tests/public-acceptance.ts'},
   procedures:['CreateSession','GetSession','DeleteSession','Readiness'],
   sessions:{create:'CreateSession',get:'GetSession',delete:'DeleteSession',ready:'Readiness'},
-  async register(app) {app.get('/inventory',async()=>({items:[]}));}
+  async register(app) {app.get('/api/inventory',async()=>({items:[]}));}
 };`);
   for (const [file, text] of [
     ['web/app.ts', 'document.body.dataset.application="inventory";'],
@@ -38,6 +52,7 @@ export const application: ApplicationDefinition = {
     ['demo/schema.sql', 'CREATE TABLE dbo.Inventory (id int);'],
     ['demo/grants.sql', '-- scoped grants'],
     ['demo/dab-config.json', '{"entities":{}}'],
+    ['tests/public-acceptance.ts', 'export async function acceptPublicApplication() {}'],
     ['smoke.ts', 'UNSELECTED_SMOKE_MUST_NOT_SHIP'],
   ] as const) await writeFile(join(home, 'examples/inventory', file), text);
   await mkdir(join(home, 'examples/unselected'), { recursive: true });
@@ -53,13 +68,14 @@ test('selected builds are workspace-scoped, immutable and exclude unselected exa
   const built = await buildSelectedApplication(home, 'inventory', 'public-demo');
   assert.ok(built.directory.startsWith(join(home, '.sql-apps', 'workspaces')));
   assert.equal(built.manifest.name, 'inventory');
-  assert.deepEqual(built.manifest.routes, [{ method: 'GET', path: '/inventory' }]);
+  assert.deepEqual(built.manifest.routes, [{ method: 'GET', path: '/api/inventory' }]);
   assert.deepEqual(built.manifest.profiles, ['local-simulation', 'public-demo']);
   assert.equal(await readFile(join(home, 'application.json'), 'utf8'), rootManifest);
   const delivered = await readFile(join(built.directory, 'server/application.mjs'), 'utf8');
   assert.doesNotMatch(delivered, /UNSELECTED_|storage-blob|file-jobs|local-app/);
   const docker = await readFile(join(built.directory, 'Dockerfile'), 'utf8');
   assert.doesNotMatch(docker, /COPY\s+\.\s|examples|tests|functions/);
+  assert.doesNotMatch(docker, /COPY.*public|COPY.*static/);
   const labels = [
     `io.sql-apps.application="inventory"`,
     `io.sql-apps.profile="public-demo"`,
@@ -75,6 +91,7 @@ test('selected builds are workspace-scoped, immutable and exclude unselected exa
   const startup = await readFile(join(built.directory, 'server/start.mjs'), 'utf8');
   assert.match(startup, /process\.env\.SQL_APPS_PROFILE/);
   assert.match(startup, /Explicit SQL_APPS_PROFILE is required/);
+  assert.match(startup, /transport:publicDemo\?'static-web-apps':'direct'/);
   await assert.rejects(run(process.execPath, [join(built.directory, 'server/start.mjs')], {
     env: { SQL_APPS_PROFILE: undefined },
   }), /Explicit SQL_APPS_PROFILE is required/);
@@ -83,6 +100,15 @@ test('selected builds are workspace-scoped, immutable and exclude unselected exa
   assert.doesNotMatch(ignore, /!sql|!setup|!application-build|!examples|!tests/);
   assert.ok(built.manifest.files.some(file => file.path === 'sql/database.sqlproj'));
   assert.ok(built.manifest.files.some(file => file.path === 'dab/dab-config.json'));
+  for (const file of [
+    'static/index.html', 'static/app.css', 'static/app.js', 'static/staticwebapp.config.json',
+    'acceptance/public.mjs',
+  ]) {
+    assert.ok(built.manifest.files.some(item => item.path === file), `Missing ${file}`);
+  }
+  const swa = JSON.parse(await readFile(join(built.directory, 'static', 'staticwebapp.config.json'), 'utf8'));
+  assert.deepEqual(swa.routes, [{ route: '/api/*', allowedRoles: ['anonymous'] }]);
+  assert.equal(swa.navigationFallback.rewrite, '/index.html');
   assert.deepEqual((await checkSelectedApplication(home, built.directory, 'public-demo')).routes, built.manifest.routes);
   assert.match(await run(process.execPath, [
     resolve('scripts/check-application.mjs'), '--selected', built.directory, 'public-demo', home,
@@ -105,9 +131,9 @@ test('selected build gate rejects profile, source, namespace and route mismatche
   t.after(() => rm(other, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   await assert.rejects(checkSelectedApplication(other, built.directory, 'local-simulation'), /workspace/);
   const module = join(home, 'examples/inventory/application.ts');
-  await writeFile(module, (await readFile(module, 'utf8')).replace("path:'/inventory'", "path:'/missing'"));
+  await writeFile(module, (await readFile(module, 'utf8')).replace("path:'/api/inventory'", "path:'/api/missing'"));
   await assert.rejects(buildSelectedApplication(home, 'inventory', 'public-demo'), /route contract/);
-  await writeFile(module, (await readFile(module, 'utf8')).replace("path:'/missing'", "path:'/inventory'"));
+  await writeFile(module, (await readFile(module, 'utf8')).replace("path:'/api/missing'", "path:'/api/inventory'"));
   await writeFile(join(home, 'examples/unselected/application.ts'), 'export const secret = "UNSELECTED_APP_MUST_NOT_SHIP";');
   await writeFile(module, `import {secret} from '../unselected/application.js';\n${await readFile(module, 'utf8')}\nconsole.log(secret);`);
   await assert.rejects(buildSelectedApplication(home, 'inventory', 'public-demo'), /unselected example/);

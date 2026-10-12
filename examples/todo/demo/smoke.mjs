@@ -24,7 +24,7 @@ const request = async (path, method = 'GET', body, cookie) => {
 };
 const start = async () => {
   const before = Date.now();
-  const response = await request('/session', 'POST', { synthetic: true });
+  const response = await request('/api/session', 'POST', { synthetic: true });
   assert.equal(response.status, 201);
   assert.ok(response.cookie);
   const hash = createHash('sha256').update(response.cookie.split('=')[1]).digest('hex');
@@ -47,21 +47,72 @@ const reset = hash => admin(`UPDATE dbo.DemoSessions SET window_start=DATEADD(SE
 let failure;
 try {
   assert.equal((await request('/health/ready')).status, 200);
+  const globalLimits = await admin(`
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+BEGIN TRY
+    DELETE FROM dbo.DemoSessions;
+    ;WITH numbers AS (
+        SELECT 1 AS value
+        UNION ALL
+        SELECT value + 1 FROM numbers WHERE value < 1000
+    )
+    INSERT dbo.DemoSessions(token_hash, expires_at, window_start)
+    SELECT CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varchar(11), value)), 2),
+           DATEADD(MINUTE, 60, SYSUTCDATETIME()), SYSUTCDATETIME()
+    FROM numbers
+    OPTION (MAXRECURSION 1000);
+    DECLARE @capacity TABLE(outcome nvarchar(32), expires_at datetime2(3));
+    INSERT @capacity EXEC dbo.DemoCreateSession
+        @token_hash = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
+    SELECT CONCAT(N'session|', outcome) FROM @capacity;
+
+    DELETE FROM dbo.DemoSessions;
+    DECLARE @hash char(64) = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+    INSERT dbo.DemoSessions(token_hash, expires_at, window_start)
+    VALUES (@hash, DATEADD(MINUTE, 60, SYSUTCDATETIME()), SYSUTCDATETIME());
+    UPDATE dbo.DemoLimits
+    SET global_window_start = SYSUTCDATETIME(), global_mutation_count = 300
+    WHERE id = 1;
+    DECLARE @mutation TABLE(outcome nvarchar(32), id uniqueidentifier, title nvarchar(200), completed bit);
+    INSERT @mutation EXEC dbo.DemoTodoMutate
+        @action = N'create', @token_hash = @hash, @title = N'global limit acceptance';
+    SELECT CONCAT(N'mutation|', outcome) FROM @mutation;
+    ROLLBACK TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+`);
+  assert.ok(globalLimits.split(/\r?\n/).includes('session|capacity'));
+  assert.ok(globalLimits.split(/\r?\n/).includes('mutation|rate_limited'));
   const live = await request('/application/manifest');
   assert.equal(live.body.name, manifest.name);
   assert.deepEqual(live.body.routes, manifest.routes);
   const a = await start();
   const b = await start();
-  const created = await request('/todos', 'POST', { title: '<script>synthetic text only</script>' }, a.cookie);
+  const created = await request('/api/todos', 'POST', { title: '<script>synthetic text only</script>' }, a.cookie);
   assert.equal(created.status, 201);
   const id = created.body.id;
-  assert.deepEqual((await request('/todos', 'GET', undefined, b.cookie)).body, { items: [] });
-  assert.equal((await request(`/todos/${id}`, 'PATCH', { completed: true }, b.cookie)).status, 404);
-  assert.equal((await request(`/todos/${id}`, 'DELETE', undefined, b.cookie)).status, 404);
-  assert.equal((await request(`/todos/${id}`, 'PATCH', { completed: true }, a.cookie)).body.completed, true);
-  assert.equal((await request('/todos', 'POST', { title: 'x'.repeat(200) }, a.cookie)).status, 201);
-  assert.equal((await request('/todos', 'POST', { title: 'x'.repeat(201) }, a.cookie)).status, 400);
-  assert.equal((await request('/todos', 'POST', { title: 'synthetic', owner_oid: randomUUID() }, a.cookie)).status, 400);
+  assert.deepEqual((await request('/api/todos', 'GET', undefined, b.cookie)).body, { items: [] });
+  assert.equal((await request(`/api/todos/${id}`, 'PATCH', { completed: true }, b.cookie)).status, 404);
+  assert.equal((await request(`/api/todos/${id}`, 'DELETE', undefined, b.cookie)).status, 404);
+  assert.equal((await request(`/api/todos/${id}`, 'PATCH', { completed: true }, a.cookie)).body.completed, true);
+  assert.equal((await request('/api/todos', 'POST', { title: 'x'.repeat(200) }, a.cookie)).status, 201);
+  assert.equal((await request('/api/todos', 'POST', { title: 'x'.repeat(201) }, a.cookie)).status, 400);
+  const unicodeTitle = String.fromCodePoint(0x1F33F).repeat(100);
+  assert.equal(unicodeTitle.length, 200);
+  const unicodeCreated = await request('/api/todos', 'POST', { title: unicodeTitle }, a.cookie);
+  assert.equal(unicodeCreated.status, 201);
+  assert.equal(unicodeCreated.body.title, unicodeTitle);
+  assert.equal((await request('/api/todos', 'POST', { title: unicodeTitle + 'x' }, a.cookie)).status, 400);
+  assert.equal((await request(`/api/todos/${id}`, 'PATCH', { title: unicodeTitle + 'x' }, a.cookie)).status, 400);
+  const unicodeUpdated = await request(`/api/todos/${id}`, 'PATCH', { title: unicodeTitle }, a.cookie);
+  assert.equal(unicodeUpdated.status, 200);
+  assert.equal(unicodeUpdated.body.title, unicodeTitle);
+  assert.equal((await request('/api/todos', 'POST', { title: 'synthetic', owner_oid: randomUUID() }, a.cookie)).status, 400);
   const q = await start();
   for (let index = 0; index < 49; index++) {
     if (index === 30) await reset(q.hash);
@@ -71,18 +122,18 @@ try {
   const quota = await Promise.all(Array.from({ length: 20 }, (_, index) => dab('Create', { token_hash: q.hash, title: `Concurrent synthetic ${index}` })));
   assert.equal(quota.filter(rows => rows[0].outcome === 'ok').length, 1);
   assert.equal(quota.filter(rows => rows[0].outcome === 'quota').length, 19);
-  assert.equal((await request('/todos', 'GET', undefined, q.cookie)).body.items.length, 50);
-  assert.equal((await request('/todos', 'POST', { title: 'Synthetic 51' }, q.cookie)).status, 409);
+  assert.equal((await request('/api/todos', 'GET', undefined, q.cookie)).body.items.length, 50);
+  assert.equal((await request('/api/todos', 'POST', { title: 'Synthetic 51' }, q.cookie)).status, 409);
   const rate = await start();
-  const attempts = await Promise.all(Array.from({ length: 31 }, (_, index) => request('/todos', 'POST', { title: `Synthetic rate ${index}` }, rate.cookie)));
+  const attempts = await Promise.all(Array.from({ length: 31 }, (_, index) => request('/api/todos', 'POST', { title: `Synthetic rate ${index}` }, rate.cookie)));
   assert.equal(attempts.filter(result => result.status === 201).length, 30);
   assert.equal(attempts.filter(result => result.status === 429).length, 1);
   await reset(rate.hash);
-  assert.equal((await request('/todos', 'POST', { title: 'Synthetic new window' }, rate.cookie)).status, 201);
+  assert.equal((await request('/api/todos', 'POST', { title: 'Synthetic new window' }, rate.cookie)).status, 201);
   const expiring = await start();
-  assert.equal((await request('/todos', 'POST', { title: 'Synthetic expiring' }, expiring.cookie)).status, 201);
+  assert.equal((await request('/api/todos', 'POST', { title: 'Synthetic expiring' }, expiring.cookie)).status, 201);
   await admin(`UPDATE dbo.DemoSessions SET expires_at=DATEADD(SECOND,-1,SYSUTCDATETIME()) WHERE token_hash='${expiring.hash}';`);
-  assert.equal((await request('/todos', 'GET', undefined, expiring.cookie)).status, 401);
+  assert.equal((await request('/api/todos', 'GET', undefined, expiring.cookie)).status, 401);
   assert.equal((await dab('List', { token_hash: expiring.hash }))[0].outcome, 'expired');
   expired.push(...Array.from({ length: 35 }, () => randomBytes(32).toString('hex')));
   await admin(`INSERT dbo.DemoSessions(token_hash,expires_at,window_start) VALUES ${
@@ -103,7 +154,7 @@ SELECT N'PROCEDURE OWNERSHIP AND PERMISSIONS PASSED';
 `, run);
   assert.ok(permissions.includes('PROCEDURE OWNERSHIP AND PERMISSIONS PASSED'));
   assert.ok(!permissions.includes(id));
-  assert.equal((await request('/session', 'DELETE', undefined, a.cookie)).status, 204);
+  assert.equal((await request('/api/session', 'DELETE', undefined, a.cookie)).status, 204);
   assert.equal((await admin(`SET NOCOUNT ON; SELECT COUNT(*) FROM dbo.Todos WHERE owner_session_hash='${a.hash}';`)).trim(), '0');
 } catch (error) {
   failure = error;

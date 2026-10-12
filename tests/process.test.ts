@@ -44,3 +44,12 @@ test('command runner supports input and per-command environment with explicit re
     { env: { TEST_SECRET: value }, redact: [value] }),
   (error: unknown) => error instanceof Error && !error.message.includes(value) && error.message.includes('[REDACTED]'));
 });
+
+test('command runner can suppress all output from secret-returning commands', async () => {
+  const value = 'unavailable-before-command-completes';
+  await assert.rejects(run(process.execPath,
+    ['-e', 'process.stdout.write(process.argv[1]);process.exitCode=1', value],
+    { sensitiveOutput: true }),
+  (error: unknown) => error instanceof Error &&
+    !error.message.includes(value) && error.message.includes('sensitive command output omitted'));
+});

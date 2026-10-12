@@ -8,6 +8,7 @@ export interface DemoOptions {
   profile: ApplicationProfile;
   origin: string;
   dabUrl: string;
+  transport?: 'direct' | 'static-web-apps';
   publicDirectory?: string;
 }
 
@@ -17,6 +18,7 @@ export async function createDemoApplication(
   const origin = new URL(options.origin);
   const data = new URL(options.dabUrl);
   const secure = options.profile === 'public-demo';
+  const transport = options.transport ?? 'direct';
   if (origin.origin !== options.origin || origin.username || origin.password ||
       (secure ? origin.protocol !== 'https:' : origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1')) {
     throw new Error('Public demo requires an HTTPS origin; local test transport requires an exact loopback HTTP origin');
@@ -68,18 +70,21 @@ export async function createDemoApplication(
     },
     async register(app) {
       app.addHook('onRequest', async (request, reply) => {
-        if (['/health/live', '/health/ready'].includes(request.url.split('?')[0]!)) return;
-        if (request.headers.host !== origin.host || request.headers['x-ms-client-principal'] !== undefined ||
+        if (['/health/live', '/health/ready', '/api/health/live', '/api/health/ready']
+          .includes(request.url.split('?')[0]!)) return;
+        if ((transport === 'direct' && request.headers.host !== origin.host) ||
+            request.headers['x-ms-client-principal'] !== undefined ||
             request.headers['x-ms-api-role'] !== undefined ||
             (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && request.headers.origin !== options.origin)) {
           return reply.code(403).send({ error: 'Use this application origin without submitted identities or roles' });
         }
       });
-      app.get('/application/config', async () => ({
+      app.get('/api/application/config', async () => ({
         profile: options.profile, syntheticDataOnly: true, sessionMinutes: 60,
         itemLimit: 50, titleLimit: 200, mutationsPerMinute: 30,
+        globalSessionLimit: 1000, globalMutationsPerMinute: 300,
       }));
-      app.post('/session', async (request, reply) => {
+      app.post('/api/session', async (request, reply) => {
         if (!z.strictObject({ synthetic: z.literal(true) }).safeParse(request.body).success) {
           throw new ApplicationError(400, 'Explicitly acknowledge synthetic data only');
         }
@@ -94,14 +99,14 @@ export async function createDemoApplication(
         reply.header('set-cookie', sessionCookie(cookieName, token, secure));
         return reply.code(201).send(created);
       });
-      app.get('/session', async request => {
+      app.get('/api/session', async request => {
         const token = sessionToken(request, cookieName);
         if (!token) throw new ApplicationError(401, 'No visitor session');
         const session = await readSession(adapter, definition.sessions.get, sessionHash(token));
         if (!session) throw new ApplicationError(401, 'Visitor session expired');
         return session;
       });
-      app.delete('/session', async (request, reply) => {
+      app.delete('/api/session', async (request, reply) => {
         const token = sessionToken(request, cookieName);
         if (token) {
           await readSession(adapter, definition.sessions.delete, sessionHash(token));

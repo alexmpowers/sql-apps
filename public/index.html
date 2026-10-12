@@ -10,14 +10,14 @@
     <main>
       <h1>SQL Apps</h1>
       <p>Azure-native data, files, and functions.</p>
-      <button id="login">Sign in with Microsoft Entra ID</button>
-      <button id="logout" hidden>Sign out</button>
-      <section id="local-identity" hidden>
-        <p><strong>Local development only.</strong> Identities are simulated. No Azure subscription required.</p>
-        <label>Development user <select id="development-user"></select></label>
-        <button id="select-user">Use selected user</button>
+      <section aria-label="Account and application access">
+        <p id="auth-notice" hidden></p>
+        <button id="login" hidden>Sign in with Microsoft</button>
+        <button id="logout" hidden>Sign out</button>
+        <button id="auth-retry" hidden>Try again</button>
+        <p id="auth-status" role="status" aria-live="polite">Loading account options...</p>
       </section>
-      <p id="status" role="status"></p>
+      <p id="status" role="status" aria-live="polite"></p>
       <section id="workspace" hidden>
         <p id="service-notice" hidden>File storage and Functions are unavailable in this local SQL stack.</p>
         <form id="file-form"><label>File <input id="file" type="file" required></label><button>Upload</button></form>
@@ -25,6 +25,7 @@
           <h2>Files</h2>
           <p>Up to 4 MiB each. Uploading the same name replaces your file. Processing uses an immutable snapshot.</p>
           <button id="refresh-files">Refresh files</button>
+          <button id="load-more-files" hidden>Load more files</button>
           <ul id="files"></ul>
           <p id="no-files" hidden>No files uploaded.</p>
         </section>

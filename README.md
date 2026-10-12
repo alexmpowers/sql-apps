@@ -33,15 +33,17 @@ node scripts/setup-check.mjs
 
 The check explains missing prerequisites without installing anything. The guides and commands do not require a particular LLM provider. If you use GitHub Copilot, the optional [Copilot plugin](docs/reference/copilot-plugin.md) adds project-specific skills.
 
+For one connected setup journey, ask your assistant to use the [setup coordinator](docs/reference/setup.md). It plans needed installation, restore, build, workspace and startup steps, then resumes after explicit approvals without repeating current work. It does not generate your domain app, accept licenses or deploy to Azure.
+
 ## What to expect
 
 **Local first.** No Azure subscription is needed to run locally. You need Node 22 or 24, a .NET SDK, Docker with Linux containers, and access to the Azure SQL Database container. The container is in **private preview**: [request access](https://aka.ms/azuresqldb-container-signup) and read the [container documentation](https://aka.ms/azuresqldb-container). Initial package and image downloads require internet. Docker and your chosen AI provider have their own licensing/access conditions.
 
 **Your application.** Work with your AI assistant to implement and test its screens and SQL behavior using the existing foundation. This is not a one-command generator. The default foundation has no Todo screen or sample data; examples are selected explicitly.
 
-**A useful first result.** Run the app, create a record, reload it, and make a change such as adding a field or filter. Implemented, built, running and workflow-verified are separate milestones; a launch URL is usable only after the intended server responds. [Run locally](docs/guides/run-locally.md) explains startup paths, scoped approvals and how to keep your data between sessions.
+**A useful first result.** Run the app, create a record, reload it, and make a change such as adding a field or filter. A launch URL is usable only after the intended server responds. [Run locally](docs/guides/run-locally.md) explains startup paths, scoped approvals and how to keep your data between sessions.
 
-**Sharing is optional.** Azure is the cloud target. Free tier means recurring allowances, not trial credits or unlimited usage. The explicit [role-based-data profile](docs/reference/role-based-data.md) starts SQL/DAB/browser locally and selects matching authenticated Azure resources without file/job services. Its private-network SQL deployment is paid and still needs live acceptance; the full foundation retains its existing services. The minimal public-demo workflow is incomplete, and its cost review is demo-only. Read [Sharing your app](docs/guides/sharing.md) and [Costs and growth](docs/guides/costs.md) before choosing a cloud path. Existing Azure resources are collision information, not permission to replace your new app with an older deployment.
+**Sharing is optional.** Azure is the cloud target. Free tier means recurring allowances, not trial credits or unlimited usage. When you are ready to share, read [Sharing your app](docs/guides/sharing.md) and [Costs and growth](docs/guides/costs.md) before choosing a cloud path.
 
 ## Find your next step
 
@@ -55,6 +57,17 @@ The check explains missing prerequisites without installing anything. The guides
 | Share with other people | [Sharing your app](docs/guides/sharing.md) |
 | Find detailed commands or contribute | [Documentation index](docs/README.md) |
 
-Under the hood, SQL Apps uses TypeScript, Azure SQL Database, Data API builder, Blob Storage and Azure Functions. You do not need to choose or configure cloud services to begin building locally.
+Under the hood, every profile uses TypeScript, Azure SQL Database and Data API builder. Profiles that need files or background jobs also use Blob Storage and Azure Functions. You do not need to choose or configure cloud services to begin building locally.
+
+## Trademarks
+
+This project may contain trademarks or logos for projects, products, or services.
+Authorized use of Microsoft trademarks or logos must follow the [Microsoft Trademark and Brand Guidelines](https://www.microsoft.com/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
+Any use of third-party trademarks or logos is subject to those third parties' policies.
+
+## License
+
+[MIT](LICENSE)
 
 For contributions and help, see [Contributing](CONTRIBUTING.md), [Support](SUPPORT.md) and [Security](SECURITY.md).

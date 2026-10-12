@@ -1,11 +1,14 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, access } from 'node:fs/promises';
-import { totalmem } from 'node:os';
+import { readFile, access, realpath, lstat, mkdir, writeFile } from 'node:fs/promises';
+import { totalmem, hostname, release } from 'node:os';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runtimeFor } from '../src/workspace.mjs';
+import { createRequire } from 'node:module';
+import { randomUUID, createHash } from 'node:crypto';
+import { runtimeFor, describeWorkspace } from '../src/workspace.mjs';
+import { readSqlSources, roleBasedDabProblem, roleBasedProcedureProblem, roleBasedProfileProblem } from '../src/role-based-rules.mjs';
 
 const execute = promisify(execFile);
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -16,7 +19,7 @@ async function exists(path) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
-async function run(command, args, root) {
+export async function runProbe(command, args, root) {
   const options = { cwd: root, timeout: 10000, maxBuffer: 1024 * 1024, windowsHide: true, shell: false };
   if (command === 'npm' && process.platform === 'win32') {
     const { stdout } = await execute('where.exe', ['npm'], options);
@@ -50,24 +53,38 @@ export function parseArguments(args) {
     if (args[i] === '--json' && !options.json) options.json = true;
     else if (args[i] === '--container' && !options.container && containerPattern.test(args[i + 1] ?? '')) options.container = args[++i];
     else if (args[i] === '--profile' && !options.profile && ['foundation', 'role-based-data'].includes(args[i + 1])) options.profile = args[++i];
-    else throw new Error('Usage: node scripts/setup-check.mjs [--json] [--container <existing-sql-container>] [--profile <foundation|role-based-data>]');
+    else if (args[i] === '--workspace' && !options.workspace && (args[i + 1] === 'legacy' || /^\d{5}$/.test(args[i + 1] ?? ''))) options.workspace = args[++i];
+    else throw new Error('Usage: node scripts/setup-check.mjs [--json] [--container <existing-sql-container>] [--profile <foundation|role-based-data>] [--workspace <base-port|legacy>]');
   }
   return options;
 }
 
 export async function checkSetup(options = {}, injected = {}) {
   const root = resolve(options.root ?? defaultRoot);
-  const runtime = runtimeFor(undefined, root);
+  let proposed;
+  if (options.workspace !== undefined) {
+    if (typeof options.workspace !== 'string' || options.workspace !== 'legacy' && !/^\d{5}$/.test(options.workspace)) {
+      throw new Error('Invalid setup workspace selection');
+    }
+    proposed = describeWorkspace(root, options.workspace === 'legacy' ? 'legacy' : Number(options.workspace));
+  }
+  const selected = runtimeFor(options.container, root);
+  if (proposed && selected.mode !== 'legacy-unselected' &&
+      (proposed.mode !== selected.mode || proposed.mode === 'isolated' && proposed.basePort !== selected.ports.gateway)) {
+    throw new Error('Requested workspace differs from the existing selection; inspect it without overwriting.');
+  }
+  const runtime = proposed ? runtimeFor(options.container, root, proposed) : selected;
   if (options.container && !containerPattern.test(options.container)) throw new Error('Invalid SQL container name');
   if (options.profile && !['foundation', 'role-based-data'].includes(options.profile)) throw new Error('Invalid setup profile');
   const deps = {
     platform: process.platform, architecture: process.arch, nodeVersion: process.versions.node,
-    memoryBytes: totalmem(), read: path => readFile(path, 'utf8'), exists, port: portState, fetch,
-    run: (command, args) => run(command, args, root), ...injected,
+    memoryBytes: totalmem(), read: path => readFile(path, 'utf8'), exists, port: portState, fetch, sqlSources: readSqlSources,
+    run: (command, args) => runProbe(command, args, root), ...injected,
   };
   const checks = [];
-  const add = (id, status, code, message, nextAction, required = true) =>
-    checks.push({ id, status, code, message, nextAction, required });
+  const add = (id, status, code, message, nextAction, required = true, toolState) =>
+    checks.push({ id, status, code, message, nextAction, required, ...(toolState ? { toolState } : {}) });
+  const failedTool = error => error.code === 'ENOENT' ? 'missing' : 'check-failed';
   const pkg = JSON.parse(await deps.read(join(root, 'package.json')));
   if (pkg.name !== 'sql-apps') throw new Error('Run setup-check from a validated SQL Apps checkout');
   if (pkg.engines?.node !== '>=22 <23 || >=24 <25') throw new Error('Node requirements changed; update the setup diagnostic before using it');
@@ -77,37 +94,40 @@ export async function checkSetup(options = {}, injected = {}) {
   }
   const supportedNode = /^(22|24)\.\d+\.\d+$/.test(deps.nodeVersion);
   add('node', supportedNode ? 'ready' : 'action-required', supportedNode ? 'NODE_READY' : 'NODE_UNSUPPORTED',
-    `Node.js ${deps.nodeVersion}.`, 'Use Node.js 22 or 24 LTS; preserve existing version-manager installations.');
+    `Node.js ${deps.nodeVersion}.`, 'Use Node.js 22 or 24 LTS; preserve existing version-manager installations.',
+    true, supportedNode ? 'ready' : 'unsupported');
   try {
     if (!/^\d+\.\d+\.\d+\s*$/.test(await deps.run('npm', ['--version']))) throw new Error('invalid version');
-    add('npm', 'ready', 'NPM_READY', 'npm is available.', 'No installation needed.');
-  } catch {
+    add('npm', 'ready', 'NPM_READY', 'npm is available.', 'No installation needed.', true, 'ready');
+  } catch (error) {
     add('npm', 'action-required', 'NPM_UNAVAILABLE', 'npm could not be verified.',
-      'Use the Node installer that includes npm, or reopen your terminal after installation.');
+      'Check npm/PATH in a fresh terminal before reinstalling; an existing failing shim is not a missing installation.',
+      true, failedTool(error));
   }
   try {
     const sdks = await deps.run('dotnet', ['--list-sdks']);
     if (!sdks.split(/\r?\n/).some(line => Number(/^(\d+)\./.exec(line)?.[1]) >= 8)) {
       add('dotnet', 'action-required', 'SDK_TOO_OLD', '.NET SDK 8 or later is missing (a runtime alone is not sufficient).',
-        'Install a compatible .NET SDK using the getting-started guide.');
+        'Install a compatible .NET SDK using the getting-started guide.', true, 'unsupported');
     } else {
       try {
         const selected = (await deps.run('dotnet', ['--version'])).trim();
         if (!/^\d+\.\d+\.\d+$/.test(selected) || Number(selected.split('.')[0]) < 8) throw new Error('invalid SDK');
-        add('dotnet', 'ready', 'SDK_READY', `Selected .NET SDK ${selected}.`, 'SDK selection is valid in this checkout.');
+        add('dotnet', 'ready', 'SDK_READY', `Selected .NET SDK ${selected}.`, 'SDK selection is valid in this checkout.', true, 'ready');
       } catch {
         add('dotnet', 'action-required', 'SDK_SELECTION_FAILED', 'Installed SDKs do not resolve to a compatible SDK in this checkout.',
-          'Review global.json and SDK selection with Copilot; do not silently replace it.');
+          'Review global.json and SDK selection with Copilot; do not silently replace it.', true, 'check-failed');
       }
     }
-  } catch {
+  } catch (error) {
     add('dotnet', 'action-required', 'SDK_UNAVAILABLE', '.NET SDK could not be checked.',
-      'Install the SDK, not just the runtime, then reopen the terminal and run this check again.');
+      'Check the SDK/PATH in a fresh terminal; install the SDK, not just the runtime, only if missing.',
+      true, failedTool(error));
   }
   let engine;
   try {
     if (!/^Docker version \d+\.\d+\.\d+/i.test((await deps.run('docker', ['--version'])).trim())) throw new Error('invalid Docker version');
-    add('docker-cli', 'ready', 'DOCKER_CLI_READY', 'Docker CLI is available.', 'Check the engine below.');
+    add('docker-cli', 'ready', 'DOCKER_CLI_READY', 'Docker CLI is available.', 'Check the engine below.', true, 'ready');
     try {
       const result = JSON.parse(await deps.run('docker', ['info', '--format',
         '{"OSType":{{json .OSType}},"Architecture":{{json .Architecture}},"MemTotal":{{json .MemTotal}}}']));
@@ -123,9 +143,10 @@ export async function checkSetup(options = {}, injected = {}) {
       add('docker-engine', 'action-required', 'DOCKER_NOT_RUNNING', 'Docker engine did not respond with valid information.',
         'Start Docker Desktop or ask for help with the Linux service/socket permissions, then check again.');
     }
-  } catch {
+  } catch (error) {
     add('docker-cli', 'action-required', 'DOCKER_UNAVAILABLE', 'Docker CLI could not be verified.',
-      'Follow the OS-specific Docker guide; check license eligibility before installing.');
+      'Check Docker/PATH before reinstalling; follow the OS-specific guide and review license eligibility.',
+      true, failedTool(error));
     add('docker-engine', 'not-checked', 'ENGINE_NOT_CHECKED', 'Engine not checked without Docker CLI.', 'Install/start Docker, then retry.');
   }
   add('capacity', 'ready', 'CAPACITY_INFORMATION', `Host memory: ${Math.round(deps.memoryBytes / 1024 ** 3)} GiB; ` +
@@ -200,9 +221,38 @@ export async function checkSetup(options = {}, injected = {}) {
         'Identify the existing process/service with the user. Reuse only the intended application; never kill it automatically.');
     }
   }
+  if (options.profile === 'role-based-data') {
+    const guidance = 'Copy role-based-data.example.json to role-based-data.json, choose your application role and read-only readiness path, then implement that procedure and its DAB entity (docs/reference/role-based-data.md).';
+    let text;
+    try { text = await deps.read(join(root, 'role-based-data.json')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (text === undefined) {
+      add('role-based-config', 'action-required', 'ROLE_BASED_CONFIG_MISSING', 'role-based-data.json is not configured yet.', guidance, false);
+    } else {
+      let config;
+      try { config = JSON.parse(text); } catch { config = undefined; }
+      const problem = config === undefined ? 'role-based-data.json is not valid JSON.' : roleBasedProfileProblem(config);
+      let dabProblem;
+      let procedureProblem;
+      if (!problem) {
+        let dab;
+        try { dab = JSON.parse(await deps.read(join(root, 'dab', 'dab-config.json'))); dabProblem = roleBasedDabProblem(dab, config); }
+        catch (error) { if (error.code && error.code !== 'ENOENT') throw error; dabProblem = 'dab/dab-config.json is missing or not valid JSON.'; }
+        if (!dabProblem) procedureProblem = roleBasedProcedureProblem(dab, await deps.sqlSources(root));
+      }
+      if (problem) add('role-based-config', 'action-required', 'ROLE_BASED_CONFIG_INVALID', problem, guidance, false);
+      else if (dabProblem) add('role-based-config', 'action-required', 'ROLE_BASED_DAB_INVALID', dabProblem,
+        'Edit dab/dab-config.json to list only your stored-procedure entities, as shown in docs/reference/role-based-data.md, then rerun setup plan.', false);
+      else if (procedureProblem) add('role-based-config', 'action-required', 'ROLE_BASED_PROCEDURE_MISSING', procedureProblem,
+        'Add each procedure (CREATE PROCEDURE schema.name) to the SQL project under sql/, or remove its DAB entity, then rerun setup plan.', false);
+      else add('role-based-config', 'ready', 'ROLE_BASED_CONFIG_READY',
+        `role-based-data.json requires ${config.requiredRole}; DAB serves ${config.readinessPath}.`,
+        'Startup still checks that the readiness procedure exists and responds.', false);
+    }
+  }
   for (const [id, path, action] of [
-    ['dependencies', 'node_modules/typescript/package.json', 'After approval, run npm ci from this checkout. Initial downloads need internet.'],
-    ['build', 'dist/src/local-cli.js', 'After dependencies and approval, run npm run build.'],
+    ['dependencies', 'node_modules/typescript/package.json', 'After approval, use consent-run restore (guarded npm ci) from this checkout. Initial downloads need internet.'],
+    ['build', 'dist/src/local-cli.js', 'After dependencies and approval, use consent-run build (the guarded build).'],
   ]) {
     const present = await deps.exists(join(root, path));
     add(id, present ? 'ready' : 'action-required', present ? `${id.toUpperCase()}_PRESENT` : `${id.toUpperCase()}_MISSING`,
@@ -212,6 +262,216 @@ export async function checkSetup(options = {}, injected = {}) {
     workspace: { id: runtime.id, mode: runtime.mode, ports: runtime.ports, origins: runtime.origins },
     ready: checks.filter(check => check.required).every(check => check.status === 'ready'), checks,
     scope: 'Read-only prerequisite check, not SQL authorization, complete offline-cache, ownership or runtime acceptance. See docs/guides/getting-started.md.' };
+}
+
+export async function inspectDependencies(home, probe = (command, args) => runProbe(command, args, home)) {
+  const pkg = JSON.parse(await readFile(join(home, 'package.json'), 'utf8'));
+  const lock = JSON.parse(await readFile(join(home, 'package-lock.json'), 'utf8'));
+  const tools = JSON.parse(await readFile(join(home, '.config', 'dotnet-tools.json'), 'utf8'));
+  const require = createRequire(join(home, 'package.json'));
+  const checks = [];
+  let probeTimedOut = false;
+  const timedOut = error => Boolean(error?.killed);
+  // Cold dotnet/npm starts after idle can exceed the probe timeout; retry once and keep timeouts distinct from broken tools.
+  const patientProbe = async (command, args) => {
+    try { return await probe(command, args); }
+    catch (error) { if (!timedOut(error)) throw error; }
+    return probe(command, args);
+  };
+  const timeoutAction = 'The readiness probe timed out twice; this is not evidence of a missing dependency. Rerun setup plan before approving any restore.';
+  for (const group of ['dependencies', 'devDependencies']) {
+    const declared = pkg[group] ?? {};
+    const locked = lock.packages?.['']?.[group] ?? {};
+    if (JSON.stringify(Object.entries(declared).sort()) !== JSON.stringify(Object.entries(locked).sort())) {
+      checks.push({ id: group, ready: false, code: 'LOCKFILE_MISMATCH' });
+    }
+    for (const name of Object.keys(declared)) {
+      try {
+        const installed = JSON.parse(await readFile(join(home, 'node_modules', ...name.split('/'), 'package.json'), 'utf8'));
+        const version = lock.packages?.[`node_modules/${name}`]?.version;
+        const entry = require.resolve(name.startsWith('@types/') ? `${name}/package.json` : name);
+        await access(entry);
+        checks.push({ id: name, ready: typeof version === 'string' && installed.name === name && installed.version === version,
+          code: installed.version === version ? 'PACKAGE_RESOLVED' : 'PACKAGE_VERSION_MISMATCH' });
+      } catch (error) {
+        if (!['ENOENT', 'MODULE_NOT_FOUND', 'ERR_PACKAGE_PATH_NOT_EXPORTED'].includes(error.code)) throw error;
+        checks.push({ id: name, ready: false, code: 'PACKAGE_UNRESOLVED' });
+      }
+    }
+  }
+  if (checks.every(check => check.ready)) {
+    try {
+      const tree = JSON.parse(await patientProbe('npm', ['ls', '--all', '--json', '--offline']));
+      const valid = node => node && typeof node === 'object' && !Array.isArray(node) &&
+        !node.missing && !node.invalid && (!node.problems || Array.isArray(node.problems) && node.problems.length === 0) &&
+        Object.values(node.dependencies ?? {}).every(valid);
+      checks.push({ id: 'npm-tree', ready: valid(tree), code: valid(tree) ? 'NPM_TREE_VERIFIED' : 'NPM_TREE_UNVERIFIED' });
+    } catch (error) {
+      if (timedOut(error)) {
+        probeTimedOut = true;
+        checks.push({ id: 'npm-tree', ready: false, code: 'NPM_TREE_PROBE_TIMEOUT', nextAction: timeoutAction });
+      } else {
+        checks.push({ id: 'npm-tree', ready: false, code: 'NPM_TREE_UNVERIFIED',
+          nextAction: 'Inspect npm ls --all --json --offline before approving dependency restore.' });
+      }
+    }
+  }
+  const npmReady = checks.every(check => check.ready);
+  const sqlChecks = [];
+  for (const [name, tool] of Object.entries(tools.tools ?? {})) {
+    if (!Array.isArray(tool.commands) || tool.commands.length !== 1 || !/^[a-z][a-z0-9-]*$/.test(tool.commands[0]) ||
+        !/^\d+\.\d+\.\d+$/.test(tool.version) || tool.commands[0] !== 'sqlpackage') {
+      throw new Error('Unsupported SQL tool manifest; review setup diagnostics');
+    }
+    try {
+      const output = await patientProbe('dotnet', ['tool', 'run', tool.commands[0], '--', '/Version']);
+      sqlChecks.push({ id: name, ready: [tool.version, `${tool.version}.0`].includes(output.trim()), code: 'SQL_TOOL_VERSION_CHECKED' });
+    } catch (error) {
+      if (timedOut(error)) {
+        probeTimedOut = true;
+        sqlChecks.push({ id: name, ready: false, code: 'SQL_TOOL_PROBE_TIMEOUT', nextAction: timeoutAction });
+      } else {
+        sqlChecks.push({ id: name, ready: false, code: 'SQL_TOOL_UNAVAILABLE',
+          nextAction: 'Review dotnet tool restore and required runtimes; a failed probe does not authorize a system install.' });
+      }
+    }
+  }
+  const sqlToolsReady = sqlChecks.length > 0 && sqlChecks.every(check => check.ready);
+  return { ready: npmReady && sqlToolsReady, npmReady, sqlToolsReady, probeTimedOut, checks: [...checks, ...sqlChecks] };
+}
+
+export async function runSetupCommand(file, args, home) {
+  await new Promise((done, reject) => {
+    const child = spawn(file, args, { cwd: home, shell: false, windowsHide: true,
+      stdio: ['inherit', 2, 2], env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: '1' } });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(Object.assign(new Error('Setup command timed out; inspect any active installer before retrying.'), { code: 'ETIMEDOUT' }));
+    }, 15 * 60 * 1000);
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || signal) reject(Object.assign(new Error('Setup command failed; review process output.'), { code, signal }));
+      else done();
+    });
+  });
+}
+
+async function setupHost() {
+  const host = { name: hostname(), platform: process.platform, architecture: process.arch, release: release() };
+  if (process.platform === 'linux') {
+    const content = await readFile('/etc/os-release', 'utf8');
+    host.distro = /^ID=["']?([^"'\r\n]+)["']?$/m.exec(content)?.[1] ?? 'unknown';
+    host.distroVersion = /^VERSION_ID=["']?([^"'\r\n]+)["']?$/m.exec(content)?.[1] ?? 'unknown';
+  }
+  return host;
+}
+
+export async function planInstallation(value, tool, injected = {}) {
+  const home = await realpath(value);
+  if (!['node', 'npm', 'dotnet', 'docker'].includes(tool)) throw new Error('Choose node, npm, dotnet or docker; cloud tools are not local prerequisites.');
+  const host = injected.host ?? await setupHost();
+  const probe = injected.probe ?? ((file, args) => runProbe(file, args, home));
+  const report = await (injected.report ?? (() => checkSetup({ root: home })))();
+  const state = report.checks.find(check => check.id === (tool === 'docker' ? 'docker-cli' : tool))?.toolState;
+  const source = tool === 'docker' ? 'https://docs.docker.com/get-started/get-docker/' :
+    tool === 'dotnet' ? 'https://learn.microsoft.com/dotnet/core/install/' : 'https://nodejs.org/en/download';
+  const plan = { version: 1, planId: randomUUID(), home, host, tool, source, outcome: 'manual', command: null,
+    effects: [], nextAction: 'Review the official installer for this OS/CPU. Preserve existing tools; reopen the terminal and check setup again.' };
+  if (state === 'ready') return { ...plan, outcome: 'ready', nextAction: 'No installation needed.' };
+  if (state !== 'missing') return { ...plan,
+    nextAction: 'Resolve the installed tool/version/PATH check before installing. Do not overwrite a version manager or broken shim.' };
+  if (tool === 'node' || tool === 'npm') return { ...plan,
+    nextAction: 'Bootstrap Node 22 or 24 with npm through an explicitly approved official installer, preserving version managers. This Node command cannot install its own missing runtime.' };
+  let command;
+  try {
+    if (host.platform === 'win32') {
+      if (!/^v?\d+\.\d+\.\d+/i.test((await probe('winget', ['--version'])).trim())) {
+        return { ...plan, nextAction: 'WinGet returned no recognizable version; resolve its check before installing.' };
+      }
+      command = { file: 'winget', args: ['install', '--exact', '--id',
+        tool === 'dotnet' ? 'Microsoft.DotNet.SDK.8' : 'Docker.DockerDesktop', '--source', 'winget', '--disable-interactivity'] };
+    } else if (host.platform === 'darwin') {
+      if (!/^Homebrew \d+\.\d+\.\d+/i.test((await probe('brew', ['--version'])).trim())) {
+        return { ...plan, nextAction: 'Homebrew returned no recognizable version; resolve its check before installing.' };
+      }
+      command = { file: 'brew', args: ['install', '--cask', tool === 'dotnet' ? 'dotnet-sdk@8' : 'docker-desktop'] };
+    } else if (host.platform === 'linux') {
+      const suite = { ubuntu: { '22.04': 'jammy', '24.04': 'noble' }, debian: { '12': 'bookworm', '13': 'trixie' } }[host.distro]?.[host.distroVersion];
+      if (!suite) return plan;
+      const name = tool === 'dotnet' ? 'dotnet-sdk-8.0' : 'docker-ce';
+      const policy = await probe('apt-cache', ['policy', name]);
+      const candidate = /^\s*Candidate:\s*(\S+)$/m.exec(policy)?.[1];
+      if (!candidate || !/^[0-9][a-zA-Z0-9.+:~_-]*$/.test(candidate)) return plan;
+      const lines = policy.split(/\r?\n/);
+      const start = lines.findIndex(line => new RegExp(`^\\s+(?:\\*\\*\\*\\s+)?${candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+\\d+\\s*$`).test(line));
+      const origins = [];
+      for (const line of start < 0 ? [] : lines.slice(start + 1)) {
+        if (/^\s+(?:\*\*\*\s+)?\S+\s+\d+\s*$/.test(line)) break;
+        const origin = /^\s+\d+\s+(https?:\/\/\S+)\s+(\S+)/.exec(line);
+        if (origin) origins.push({ url: new URL(origin[1]), suite: origin[2] });
+      }
+      const trusted = origin => {
+        const { url } = origin;
+        if (url.username || url.password || url.port || !new RegExp(`^${suite}(?:-updates|-security|-backports)?/`).test(origin.suite)) return false;
+        const path = url.pathname.replace(/\/$/, '');
+        if (tool === 'docker') return url.protocol === 'https:' && url.hostname === 'download.docker.com' &&
+          path === `/linux/${host.distro}`;
+        if (url.hostname === 'packages.microsoft.com') return url.protocol === 'https:' &&
+          path === `/${host.distro}/${host.distroVersion}/prod`;
+        return host.distro === 'ubuntu' &&
+          (['archive.ubuntu.com', 'security.ubuntu.com'].includes(url.hostname) && path === '/ubuntu' ||
+            url.hostname === 'ports.ubuntu.com' && path === '/ubuntu-ports');
+      };
+      if (!origins.length || !origins.every(trusted) || tool === 'dotnet' && !/^8\./.test(candidate)) return plan;
+      command = { file: 'sudo', args: ['-n', 'apt-get', 'install', '--no-upgrade', '--', `${name}=${candidate}`] };
+    } else return plan;
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ...plan, nextAction: 'Package manager is missing. Use the official installer; do not install a manager implicitly.' };
+    return { ...plan, nextAction: 'Package-manager inspection failed. Review its version/repository check before installing; no changes were made.' };
+  }
+  return { ...plan, outcome: 'approval-required', command,
+    effects: ['Download and install the named system package and its dependencies; write outside the checkout.',
+      'May require administrator authentication, terminal/editor restart or manual installer/license completion.',
+      ...(tool === 'docker' ? ['Review Docker licensing and networking/service effects before approval. Do not auto-accept terms, enable WSL or reboot.'] : []),
+      ...(tool === 'dotnet' ? ['Install the SDK 8 servicing line, not a runtime-only or unversioned latest package; re-probe the selected SDK afterward.'] : [])],
+    nextAction: 'Review this entire plan. Only after explicit approval, save it outside tracked source and run setup install with that absolute plan path.' };
+}
+
+export async function installReviewed(path, value, injected = {}) {
+  const home = await realpath(value);
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024) throw new Error('Reviewed installation plan must be a bounded regular JSON file.');
+  const text = await readFile(path, 'utf8');
+  if (Buffer.byteLength(text) > 64 * 1024) throw new Error('Reviewed installation plan is too large.');
+  const approved = JSON.parse(text.replace(/^\uFEFF/, ''));
+  const current = await planInstallation(home, approved.tool, injected);
+  const contract = plan => JSON.stringify({ ...plan, planId: undefined });
+  if (!/^[a-f0-9-]{36}$/.test(approved.planId ?? '') || contract(approved) !== contract(current) ||
+      current.outcome !== 'approval-required') throw new Error('Installation plan changed or is stale; recheck and review a new plan.');
+  const directory = join(home, '.sql-apps');
+  await mkdir(directory, { recursive: true });
+  if ((await lstat(directory)).isSymbolicLink()) throw new Error('Installation state must not be a symlink.');
+  try {
+    await writeFile(join(directory, `install-${approved.planId}.json`),
+      JSON.stringify({ version: 1, consumedAt: new Date().toISOString(), tool: approved.tool,
+        contract: createHash('sha256').update(contract(approved)).digest('hex') }),
+      { flag: 'wx', mode: 0o600 });
+  } catch (error) {
+    if (error.code === 'EEXIST') throw new Error('Installation approval was already consumed; review a new plan before retrying.');
+    throw error;
+  }
+  try { await (injected.runner ?? runSetupCommand)(current.command.file, current.command.args, home); }
+  catch (error) {
+    return { version: 1, planId: approved.planId, ready: false, outcome: 'failed',
+      code: error.code === 'ETIMEDOUT' ? 'INSTALL_TIMEOUT' : error.code === 'ENOENT' ? 'INSTALLER_UNAVAILABLE' : 'INSTALL_FAILED',
+      nextAction: 'Inspect installer output, permissions, network and any active installer. Approval was consumed; retry only after reviewing a new plan.' };
+  }
+  const after = await planInstallation(home, approved.tool, injected);
+  return { version: 1, planId: approved.planId, ready: after.outcome === 'ready',
+    outcome: after.outcome === 'ready' ? 'ready' : 'restart-required',
+    nextAction: after.outcome === 'ready' ? 'Tool re-probed successfully; resume setup.' :
+      'Installation returned successfully but readiness is unverified. Complete any manual steps, reopen the host/terminal and recheck; do not reinstall automatically.' };
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -233,7 +493,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     if (process.argv.includes('--json')) console.log(JSON.stringify({
       version: 1, ready: false, checks: [{
         id: 'diagnostic', status: 'action-required', code: 'DIAGNOSTIC_FAILED', message,
-        nextAction: 'Confirm this checkout, file permissions and usage: node scripts/setup-check.mjs [--json] [--container <existing-sql-container>].',
+        nextAction: 'Confirm this checkout, file permissions and usage: node scripts/setup-check.mjs [--json] [--container <existing-sql-container>] [--profile <foundation|role-based-data>] [--workspace <base-port|legacy>].',
         required: true,
       }],
     }, null, 2));

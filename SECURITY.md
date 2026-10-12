@@ -1,9 +1,17 @@
-# Security
+<!-- BEGIN MICROSOFT SECURITY.MD V1.0.0 BLOCK -->
 
-Do not report exploitable vulnerabilities or credentials in public issues.
+<!-- markdownlint-disable-next-line first-line-h1 -->
+## Security
 
-Use [GitHub private vulnerability reporting](https://github.com/microsoft/sql-apps/security/advisories/new) if enabled. Otherwise contact the repository owner privately before sharing sensitive details.
+Microsoft takes the security of our software products and services seriously, which
+includes all source code repositories in our GitHub organizations.
 
-Report vulnerabilities in Microsoft Azure services or upstream Microsoft components through their own published security channels.
+**Please do not report security vulnerabilities through public GitHub issues.**
+
+For security reporting information, locations, contact information, and policies,
+please review the latest guidance for Microsoft repositories at
+[https://aka.ms/SECURITY.md](https://aka.ms/SECURITY.md).
+
+<!-- END MICROSOFT SECURITY.MD BLOCK -->
 
 The foundation requires live identity, authorization, networking, and recovery validation before production use. See [operations and release checks](docs/maintainers/operations.md).

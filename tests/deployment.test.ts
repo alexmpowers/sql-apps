@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { deploymentSchema, environmentKey, portFromEnvironment } from '../src/config.js';
-import { armParameters, deploy, functionRoleId, preflight, saveState, statePath, withDeploymentLock, type DeploymentState, type DeploymentOutputs } from '../src/deployment.js';
+import { armParameters, configureRedirect, deploy, functionRoleId, preflight, saveState, statePath, withDeploymentLock, type DeploymentState, type DeploymentOutputs } from '../src/deployment.js';
 import type { Run } from '../src/process.js';
 
 const config = deploymentSchema.parse(JSON.parse(await readFile('sql-apps.example.json', 'utf8')));
@@ -71,6 +73,36 @@ test('static build preflight does not require its not-yet-built output', async (
   assert.equal(calls.some(call => call.includes('repository')), false);
   assert.equal(calls.some(call => call.includes('Registered')), false);
   assert.equal(calls.filter(call => call.includes('provider')).length, 10);
+});
+test('redirect registration preserves existing URIs and adds only the dedicated HTTPS callback', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'sql-apps-redirect-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.mock.method(process, 'cwd', () => directory);
+  await mkdir(dirname(statePath(config)), { recursive: true });
+  const origin = 'https://example.azurecontainerapps.io';
+  const redirect = `${origin}/auth/redirect.html`;
+  const existing = 'https://existing.example/auth/redirect.html';
+  let registered = [existing, origin];
+  let patches = 0;
+  const run: Run = async (_command, args) => {
+    if (args[0] === 'ad') return JSON.stringify({ id: config.apiClientId, spa: { redirectUris: registered } });
+    if (args[0] === 'rest' && args.includes('PATCH')) {
+      patches++;
+      const body = args[args.indexOf('--body') + 1];
+      assert.ok(body && body.startsWith('@'));
+      registered = JSON.parse(await readFile(body.slice(1), 'utf8')).spa.redirectUris;
+    }
+    return '';
+  };
+  await configureRedirect(config, origin, run);
+  assert.deepEqual(registered, [existing, origin, redirect]);
+  await configureRedirect(config, origin, run);
+  assert.deepEqual(registered, [existing, origin, redirect]);
+  assert.equal(patches, 2);
+  for (const invalid of ['http://example.invalid', `${origin}/path`, `${origin}/`, `${origin}?x=1`]) {
+    await assert.rejects(configureRedirect(config, invalid, run), /HTTPS origin required/);
+  }
+  assert.equal(patches, 2);
 });
 async function cleanupArtifacts() {
   for (const suffix of ['.parameters.json', '.role.json', '.redirect.json']) {
@@ -141,4 +173,74 @@ test('atomic deployment state and local concurrency lock', async () => {
     });
     await withDeploymentLock(path, async () => {});
   } finally { await rm(dir, { recursive: true }); }
+});
+test('deployment lock recovers after its owner process has stopped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sql-apps-'));
+  try {
+    const path = join(dir, 'state.json');
+    await writeFile(`${path}.lock`, JSON.stringify({ pid: 2147483647, token: 'stopped-owner' }));
+    let ran = false;
+    await withDeploymentLock(path, async () => { ran = true; });
+    assert.equal(ran, true);
+    await assert.rejects(readFile(`${path}.lock`), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+  } finally { await rm(dir, { recursive: true }); }
+});
+test('deployment lock recovers an old incomplete lock from a stopped write', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sql-apps-'));
+  try {
+    const path = join(dir, 'state.json');
+    const lock = `${path}.lock`;
+    await writeFile(lock, '{"pid":');
+    const old = new Date(Date.now() - 31_000);
+    await utimes(lock, old, old);
+    await withDeploymentLock(path, async () => {});
+    await assert.rejects(readFile(lock), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+  } finally { await rm(dir, { recursive: true }); }
+});
+for (const legacy of [true, false]) test(`simultaneous ${legacy ? 'legacy' : 'directory'} stale-lock recoverers cannot remove a replacement owner`, { timeout: 5_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'sql-apps-lock-race-'));
+  const path = join(dir, 'state.json');
+  const lock = `${path}.lock`;
+  const token = legacy ? 'dead-owner' : '11111111-1111-4111-8111-111111111111';
+  const ownerPath = legacy ? lock : join(lock, `${token}.json`);
+  if (!legacy) await mkdir(lock);
+  await writeFile(ownerPath, JSON.stringify({ pid: 2147483647, token }));
+  const originalRead = fs.readFile;
+  let reads = 0;
+  let releaseReads!: () => void;
+  const bothRead = new Promise<void>(resolve => { releaseReads = resolve; });
+  let releaseSecond!: () => void;
+  const firstEntered = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const read = t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
+    const text = await originalRead(...args);
+    if (args[0] === ownerPath) {
+      const index = ++reads;
+      if (index === 2) releaseReads();
+      await bothRead;
+      if (index === 2) await firstEntered;
+    }
+    return text;
+  });
+  syncBuiltinESMExports();
+  t.after(async () => {
+    releaseReads();
+    releaseSecond();
+    read.mock.restore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  });
+  let active = 0;
+  let maximum = 0;
+  const action = async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    releaseSecond();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    active--;
+  };
+  const results = await Promise.allSettled([withDeploymentLock(path, action), withDeploymentLock(path, action)]);
+  assert.equal(maximum, 1, 'only one protected action may run at a time');
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const rejected = results.find(result => result.status === 'rejected');
+  assert.equal(rejected?.reason.code, 'EEXIST');
 });

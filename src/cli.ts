@@ -7,26 +7,138 @@ import { deployStatic, setSecret, updateImage } from './maintenance.js';
 import { buildArtifacts } from './artifacts.js';
 import { preflightDemo, DemoPreflightError } from './azure-preflight.js';
 import { reviewDemoCost } from './demo-cost.js';
+import { compareHosting } from './hosting-comparison.js';
+import {
+  demoPublicationSchema, demoPublicationStatus, planDemoPublication, publishDemo,
+  readDemoPublicationState, validateDemoPublication, type DemoPublicationState,
+} from './demo-publication.js';
 import { reviewRoleBasedCost } from './role-based-cost.js';
 import { assignApplicationRole, applicationRegistrationRole } from './role-based-identity.js';
 import { roleBasedSmoke } from './role-based-smoke.js';
-import { validateRoleBasedCloudDab } from './role-based-profile.js';
+import { validateRoleBasedCloudSource } from './role-based-profile.js';
+import { initDeploymentConfig, planDeployAll, unsetClientId, type InitOptions } from './azure-init.js';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import {
-  configureRedirect, delegatedScopeId, deploy, functionRoleId, parametersFile, preflight,
+  configureRedirect, delegatedScopeId, deploy, deploymentConfigHash, functionRoleId, parametersFile, preflight,
   publishSchema, readConfig, readState, saveJson, saveState, statePath, withDeploymentLock, provision,
+  type DeploymentState,
 } from './deployment.js';
 
 const [command, configPath = 'sql-apps.json', argument] = process.argv.slice(2);
+
+function parseFlags(args: string[], allowed: string[]): Record<string, string | undefined> {
+  const flags: Record<string, string | undefined> = {};
+  for (let i = 0; i < args.length; i += 2) {
+    const key = args[i]?.replace(/^--/, '');
+    if (!key || !args[i]!.startsWith('--') || !allowed.includes(key) || key in flags || args[i + 1] === undefined) throw new Error(`Unknown, duplicate or empty option ${args[i]}; allowed: ${allowed.map(item => `--${item}`).join(' ')}`);
+    flags[key] = args[i + 1];
+  }
+  return flags;
+}
 async function main() {
   if (command === 'help' || !command) {
-    console.log('Usage: npm run azure -- <validate|artifacts|identity|plan|provision|deploy|status|schema|static|redirect|smoke|gateway|functions|secret-set> [config.json] [secret-name]\nRun npm run build first. Azure CLI, Bicep, .NET and SqlPackage are used directly.');
+    console.log('Usage: npm run azure -- <validate|artifacts|identity|plan|provision|deploy|status|schema|static|redirect|smoke|gateway|functions|secret-set|demo-publish|demo-status|hosting-compare> [config.json] [options]\nRequires a current build (after approval, consent-run build). Azure CLI, Bicep, .NET, SqlPackage and the local pinned SWA CLI are used directly.');
     console.log('Public-demo diagnostics: demo-preflight <explicit target configuration>. Read-only cache/tenant/ARM/provider/region/permission evidence; no Graph, app registration, login reset or resource writes. Not deployment readiness.');
     console.log('Public-demo costs: demo-cost <explicit cost configuration>. Offline free-allowance/fixed-charge review; no Azure login, network requests or resource writes. Exit 2 means cost intent is blocked or acknowledgement is missing; exit 1 means invalid input.');
     console.log('Role-based-data: role-based-cost <cost configuration> is offline and profile-specific. Use validate/artifacts/identity/plan/provision/deploy/status/schema with a role-based-data deployment configuration. role-based-assign <config> <user-or-group-object-id> explicitly assigns its application role; role-based-smoke <config> needs delegated tokens with and without the required role in SQL_APPS_USER_TOKEN / SQL_APPS_SECOND_USER_TOKEN. All cloud writes need operator approval; local simulations never deploy.');
+    console.log('Shortest path: az login, then init <new-config.json> --profile <p> --location <region> --resource-group <rg> --registry <name>.azurecr.io (read-only), then deploy-all <config> to review pending paid steps and deploy-all <config> --approve <id> after explicit approval.');
+    return;
+  }
+  if (command === 'hosting-compare') {
+    if (process.argv.length !== 4) throw new Error('Usage: hosting-compare <comparison-config.json>');
+    console.log(JSON.stringify(compareHosting(JSON.parse(await readFile(resolve(configPath), 'utf8'))), null, 2));
+    return;
+  }
+  if (command === 'demo-publish' || command === 'demo-status') {
+    if (process.argv.length < 4) throw new Error(`Usage: ${command} <publication-config.json>${command === 'demo-publish' ? ' [--approve <id>]' : ''}`);
+    const flags = command === 'demo-publish' ? parseFlags(process.argv.slice(4), ['approve']) : {};
+    if (command === 'demo-status' && process.argv.length !== 4) throw new Error('demo-status accepts exactly one publication configuration');
+    const publication = demoPublicationSchema.parse(JSON.parse(await readFile(resolve(configPath), 'utf8')));
+    await validateDemoPublication(publication);
+    if (command === 'demo-status') {
+      console.log(JSON.stringify(await demoPublicationStatus(publication, run), null, 2));
+      return;
+    }
+    let state: DemoPublicationState | undefined;
+    try { state = await readDemoPublicationState(publication); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+    const reviewed = planDemoPublication(publication, state);
+    if (flags.approve !== reviewed.approval) {
+      if (flags.approve) {
+        throw new Error('The configuration, selected artifact, or pending publication work changed; review demo-publish again');
+      }
+      console.log(reviewed.warning);
+      console.log(`Pending paid/write stages: ${reviewed.pending.length ? reviewed.pending.join(' -> ') : 'none'}`);
+      for (const item of reviewed.review) console.log(item);
+      console.log(`Excluded: ${reviewed.excluded.join('; ')}.`);
+      console.log(`Approval ID: ${reviewed.approval}`);
+      if (reviewed.pending.length) console.log(`After explicit approval: demo-publish ${configPath} --approve ${reviewed.approval}`);
+      return;
+    }
+    if (!reviewed.pending.length) {
+      console.log('Public-demo publication is already at the saved ready stage; run demo-status for bounded live checks.');
+      return;
+    }
+    try {
+      const completed = await publishDemo(publication, run, fetch, reviewed.approval);
+      console.log(`Public-demo publication completed at ${completed.runtime?.publicUrl ?? 'the reviewed Static Web App URL'}.`);
+    } catch (error) {
+      console.error(`Publication stopped safely. Resume only after review: demo-publish ${configPath}`);
+      throw error;
+    }
+    return;
+  }
+  if (command === 'init') {
+    const flags = parseFlags(process.argv.slice(4), ['profile', 'location', 'resource-group', 'registry', 'environment', 'name']);
+    if (process.argv.length < 4 || !configPath.endsWith('.json')) throw new Error('Usage: init <new-config.json> --profile <foundation|role-based-data> --location <region> --resource-group <name> --registry <name>.azurecr.io [--environment dev|test|prod] [--name <name>]');
+    if (existsSync(resolve(configPath))) throw new Error(`${configPath} already exists; init never overwrites a configuration.`);
+    for (const key of ['profile', 'location', 'resource-group', 'registry']) if (!flags[key]) throw new Error(`init needs --${key}; tenant, subscription and SQL administrator come from az login.`);
+    const config = await initDeploymentConfig({
+      profile: flags.profile as InitOptions['profile'], location: flags.location!, resourceGroup: flags['resource-group']!,
+      registryServer: flags.registry!, environment: flags.environment as InitOptions['environment'], name: flags.name,
+    }, run);
+    if (config.profile === 'role-based-data') await validateRoleBasedCloudSource({ profile: 'role-based-data', requiredRole: config.requiredRole!, readinessPath: config.readinessPath! });
+    await saveJson(resolve(configPath), config);
+    console.log(`Wrote ${configPath} for subscription ${config.subscriptionId} (tenant ${config.tenantId}); ${config.sqlAdminName} becomes the SQL administrator. Nothing was created in Azure.`);
+    console.log(`Next (read-only): plan ${configPath} after identity, or deploy-all ${configPath} to review the paid steps.`);
+    return;
+  }
+  if (command === 'deploy-all') {
+    const flags = parseFlags(process.argv.slice(4), ['approve']);
+    const load = async () => {
+      const current = await readConfig(resolve(configPath));
+      let state: DeploymentState | undefined;
+      try { state = await readState(current); }
+      catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
+      if (state && state.configHash !== await deploymentConfigHash(current)) {
+        throw new Error('Deployment configuration or SQL/DAB source changed; review the saved deployment before resuming deploy-all.');
+      }
+      return planDeployAll(current, state?.stage);
+    };
+    const reviewed = await load();
+    if (flags.approve !== reviewed.approval) {
+      if (flags.approve) throw new Error('The configuration or remaining work changed since review; run deploy-all again and review the new list.');
+      console.log(`Pending paid Azure steps for ${configPath}: ${reviewed.pending.join(' -> ')}`);
+      console.log(`Not included: ${reviewed.excluded.join('; ')}.`);
+      console.log('Review cost first with demo-cost or role-based-cost, and plan (what-if) once identity exists.');
+      console.log(`After explicit approval: deploy-all ${configPath} --approve ${reviewed.approval}`);
+      return;
+    }
+    for (const step of reviewed.pending) {
+      if (!(await load()).pending.includes(step)) continue;
+      console.log(`== ${step}`);
+      const code = await new Promise<number | null>((done, reject) => spawn(process.execPath, [process.argv[1]!, step, configPath], { stdio: 'inherit' })
+        .on('error', reject).on('exit', done));
+      if (code !== 0) throw new Error(`${step} failed; fix the cause, then run deploy-all ${configPath} again to resume from the remaining steps.`);
+    }
+    console.log('deploy-all finished. Assign the application role (role-based-assign) and run smoke tests as separate decisions.');
     return;
   }
   if (command === 'demo-cost' || command === 'role-based-cost') {
-    if (process.argv.length !== 4) throw new Error('Provide an explicit matching-profile cost configuration; no billing choice or spending consent is inferred.');
+    if (process.argv.length !== 4) throw new Error('Provide an explicit matching-profile cost configuration; no billing choice or spending consent is inferred. Copy and review azure-demo-cost.example.json (foundation) or azure-role-based-cost.example.json (role-based-data).');
     const input: unknown = JSON.parse(await readFile(resolve(configPath), 'utf8'));
     const report = command === 'role-based-cost' ? reviewRoleBasedCost(input) : reviewDemoCost(input);
     console.log(JSON.stringify(report, null, 2));
@@ -43,7 +155,7 @@ async function main() {
     throw new Error(`Unknown command: ${command}`);
   }
   const config = await readConfig(resolve(configPath));
-  if (config.profile === 'role-based-data') validateRoleBasedCloudDab(JSON.parse(await readFile('dab/dab-config.json', 'utf8')), {
+  if (config.profile === 'role-based-data') await validateRoleBasedCloudSource({
     profile: 'role-based-data', requiredRole: config.requiredRole!, readinessPath: config.readinessPath!,
   });
   if (command === 'role-based-assign') {
@@ -53,6 +165,7 @@ async function main() {
     return;
   }
   if (command === 'validate') { console.log('Configuration valid'); return; }
+  if (config.apiClientId === unsetClientId && command !== 'identity') throw new Error('apiClientId is not set yet; run identity (or deploy-all) first.');
   if (command === 'artifacts') {
     await withDeploymentLock(statePath(config), async () => {
       const pinned = await buildArtifacts(config, run);
@@ -79,7 +192,7 @@ async function main() {
         adminConsentDisplayName: 'Access SQL Apps', adminConsentDescription: 'Access this application as the signed-in user.',
         userConsentDisplayName: 'Access SQL Apps', userConsentDescription: 'Access your application data.',
       }] },
-      spa: { redirectUris: ['http://localhost:8080'] },
+      spa: { redirectUris: [] },
       appRoles: config.profile === 'role-based-data' ? [applicationRegistrationRole(config)] : [{
         id: functionRoleId, value: 'Function.Invoke', displayName: 'Invoke functions',
         description: 'Allow the gateway to invoke application functions.', allowedMemberTypes: ['Application'], isEnabled: true,
@@ -87,7 +200,10 @@ async function main() {
     }));
     await run('az', ['rest', '--method', 'PATCH', '--url', `https://graph.microsoft.com/v1.0/applications/${registration.id}`, '--body', `@${path}`, '-o', 'none']);
     await run('az', ['ad', 'sp', 'create', '--id', registration.appId, '-o', 'none']);
-    console.log(`Created app registration ${registration.appId}. Set apiClientId to this value in your configuration.`);
+    if (config.apiClientId === unsetClientId) {
+      await saveJson(resolve(configPath), { ...config, apiClientId: registration.appId });
+      console.log(`Created app registration ${registration.appId} and saved it as apiClientId in ${configPath}.`);
+    } else console.log(`Created app registration ${registration.appId}. Set apiClientId to this value in your configuration.`);
     return;
   }
   if (command === 'plan') {
@@ -179,6 +295,7 @@ async function main() {
 }
 main().catch(error => {
   console.error(error instanceof DemoPreflightError ? `${error.stage}: ${error.code}: ${error.message}` :
+    error instanceof z.ZodError ? `Configuration is invalid:\n${z.prettifyError(error)}` :
     error instanceof Error ? error.message : 'Deployment command failed');
   process.exitCode = 1;
 });

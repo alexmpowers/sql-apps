@@ -13,6 +13,7 @@ const free = {
 
 test('zero-spend review fails closed on registry/network charges despite SQL/compute grants', () => {
   const report = reviewDemoCost(free);
+  assert.equal(report.hosting, 'container-apps');
   assert.equal(report.review.status, 'blocked-by-fixed-charges');
   assert.equal(report.review.canProceedToWhatIf, false);
   assert.equal(report.deployment.authorized, false);
@@ -36,6 +37,18 @@ test('zero-spend review fails closed on registry/network charges despite SQL/com
   assert.match(report.monitoring.budgetWarning, /not.*cap/i);
   assert.match(report.sql.warning, /cannot revert/i);
   assert.match(report.references.note, /Free tier.*recurring monthly allowances.*not time-bound trial credits/);
+});
+
+test('Static Web Apps reports its Standard fixed charge without estimating a price', () => {
+  const report = reviewDemoCost({ ...free, hosting: 'static-web-apps' });
+  assert.equal(report.hosting, 'static-web-apps');
+  assert.equal(report.estimatedMonthlyCost, null);
+  assert.equal(report.fixedCharges.length, 3);
+  assert.deepEqual(report.fixedCharges.at(-1), {
+    resource: 'Azure Static Web Apps Standard',
+    reason: 'A linked Container Apps backend requires Standard; the Container App, ACR, SQL, and networking remain.',
+    pricing: 'https://azure.microsoft.com/pricing/details/app-service/static/',
+  });
 });
 
 test('paid cost review requires an explicit acknowledgement even when SQL stays free-paused', () => {
@@ -66,6 +79,7 @@ test('ordinary paid SQL is separate from irreversible free-tier paid continuatio
 test('invalid cost choices fail before approval or cloud access and never imply paid fallback', () => {
   for (const input of [
     { ...free, profile: 'authenticated-application' },
+    { ...free, hosting: 'free' },
     { ...free, intent: 'free-trial' },
     { ...free, maxMonthlyCost: 0 },
     { ...free, acknowledgeFixedCharges: 'true' },
@@ -90,7 +104,7 @@ test('example and actual CLI show an honest offline blocked report with a nonzer
     error instanceof Error && /failed \(2\)/.test(error.message) &&
     /blocked-by-fixed-charges/.test(error.message) && /"authorized": false/.test(error.message));
   await assert.rejects(run(process.execPath, [resolve('dist', 'src', 'cli.js'), 'demo-cost']),
-    /explicit.*cost/i);
+    /explicit.*cost.*azure-demo-cost\.example\.json.*azure-role-based-cost\.example\.json/is);
 });
 
 test('actual CLI can review acknowledged costs but never reports deployment or a price quote', async t => {

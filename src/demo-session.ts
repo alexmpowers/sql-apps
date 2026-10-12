@@ -5,7 +5,7 @@ import { ApplicationError, type ApplicationServices } from './application.js';
 
 export const sessionMinutes = 60;
 const sessionResult = z.array(z.strictObject({
-  outcome: z.enum(['ok', 'expired']),
+  outcome: z.enum(['ok', 'expired', 'capacity']),
   expires_at: z.string().nullable(),
 })).length(1);
 
@@ -38,6 +38,10 @@ export async function readSession(
   const parsed = sessionResult.safeParse(await services.execute(procedure, { token_hash: hash }));
   if (!parsed.success) throw new ApplicationError(502, 'Invalid session procedure result');
   const row = parsed.data[0]!;
+  if (row.outcome === 'capacity') {
+    if (row.expires_at !== null) throw new ApplicationError(502, 'Invalid capacity result');
+    throw new ApplicationError(429, 'The public demo has reached its active visitor limit; try again later');
+  }
   if (row.outcome === 'expired') {
     if (row.expires_at !== null) throw new ApplicationError(502, 'Invalid expired session result');
     return null;

@@ -6,7 +6,8 @@ export const jobMessageSchema = z.strictObject({
 });
 export type JobMessage = z.infer<typeof jobMessageSchema>;
 export const fileJobSchema = z.object({
-  id: z.string().uuid().transform(value => value.toLowerCase()), filename: z.string().min(1).max(128),
+  id: z.string().uuid().transform(value => value.toLowerCase()),
+  filename: z.string().min(1).refine(value => value.length <= 128, 'Filename must be at most 128 UTF-16 code units'),
   status: z.enum(['queued', 'processing', 'completed', 'failed']),
   sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(), byte_count: z.number().int().nonnegative().nullable(),
   line_count: z.number().int().nonnegative().nullable(),

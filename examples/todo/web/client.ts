@@ -3,6 +3,7 @@ import { createSchema, identifier, itemSchema, updateSchema, type TodoItem } fro
 
 const sessionSchema = z.strictObject({ expiresAt: z.iso.datetime() });
 const listSchema = z.strictObject({ items: z.array(itemSchema) });
+const api = (path: string) => `/api${path}`;
 export class DemoApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
@@ -30,30 +31,30 @@ export class DemoClient {
     return result.data;
   }
   async session() {
-    return this.parse(sessionSchema, await this.request('/session'));
+    return this.parse(sessionSchema, await this.request(api('/session')));
   }
   async start() {
-    return this.parse(sessionSchema, await this.request('/session', {
+    return this.parse(sessionSchema, await this.request(api('/session'), {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ synthetic: true }),
     }));
   }
   async end(): Promise<void> {
-    await this.request('/session', { method: 'DELETE' });
+    await this.request(api('/session'), { method: 'DELETE' });
   }
   async list(): Promise<TodoItem[]> {
-    return this.parse(listSchema, await this.request('/todos')).items;
+    return this.parse(listSchema, await this.request(api('/todos'))).items;
   }
   async create(title: string): Promise<TodoItem> {
-    return this.parse(itemSchema, await this.request('/todos', {
+    return this.parse(itemSchema, await this.request(api('/todos'), {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(createSchema.parse({ title })),
     }));
   }
   async update(id: string, changes: Partial<Pick<TodoItem, 'title' | 'completed'>>): Promise<TodoItem> {
-    return this.parse(itemSchema, await this.request(`/todos/${identifier.parse(id)}`, {
+    return this.parse(itemSchema, await this.request(api(`/todos/${identifier.parse(id)}`), {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(updateSchema.parse(changes)),
     }));
   }
   async delete(id: string): Promise<void> {
-    await this.request(`/todos/${identifier.parse(id)}`, { method: 'DELETE' });
+    await this.request(api(`/todos/${identifier.parse(id)}`), { method: 'DELETE' });
   }
 }

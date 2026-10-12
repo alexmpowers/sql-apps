@@ -54,10 +54,15 @@ export function localTracing(connection: string) {
       } catch (error) { await this.end(span, true); throw error; }
     },
     async list(identity: UserIdentity): Promise<TraceRecord[]> {
-      const result: TraceRecord[] = [];
+      const names: string[] = [];
       for await (const blob of container.listBlobsFlat({ prefix: `${identity.tenantId}/${identity.oid}/` })) {
-        if (result.length >= 100) break;
-        result.push(traceRecordSchema.parse(JSON.parse((await container.getBlockBlobClient(blob.name).downloadToBuffer()).toString())));
+        if (names.length >= 100) break;
+        names.push(blob.name);
+      }
+      const result: TraceRecord[] = [];
+      for (let index = 0; index < names.length; index += 8) {
+        result.push(...await Promise.all(names.slice(index, index + 8).map(async name =>
+          traceRecordSchema.parse(JSON.parse((await container.getBlockBlobClient(name).downloadToBuffer()).toString())))));
       }
       return result;
     },

@@ -2,6 +2,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { resolve } from 'node:path';
 import { bearerToken, type VerifyUser, type UserIdentity } from './auth.js';
+import { accessFor } from './access.js';
 import type { RuntimeConfig } from './config.js';
 import { objectKey, type FileStore } from './storage.js';
 import type { BrowserConfig } from './browser-config.js';
@@ -10,6 +11,7 @@ import { z } from 'zod';
 import type { LocalTracing } from './local-tracing.js';
 import type { TraceParent } from './trace-contract.js';
 import type { Span } from '@opentelemetry/api';
+import { DependencyReadinessError } from './readiness.js';
 
 export interface FileProcessing {
   list(identity: UserIdentity): Promise<FileJob[]>;
@@ -37,6 +39,10 @@ interface AuthenticatedRequest extends FastifyRequest {
 }
 
 export async function createGateway(config: RuntimeConfig, dependencies: GatewayDependencies) {
+  const requiredRole = config.profile === 'role-based-data' ? config.requiredRole : undefined;
+  if (config.profile === 'role-based-data' && !requiredRole) {
+    throw new Error('Role-based-data requires a configured application role');
+  }
   const app = Fastify({
     bodyLimit: 4 * 1024 * 1024,
     logger: { redact: ['req.headers.authorization', 'req.headers.cookie'], level: 'info' },
@@ -79,8 +85,10 @@ export async function createGateway(config: RuntimeConfig, dependencies: Gateway
       if (!response.ok) return reply.code(503).send({ status: 'not-ready' });
       return { status: 'ready' };
     } catch (error) {
-      app.log.warn({ errorType: error instanceof Error ? error.name : 'UnknownError' }, 'Data API health check failed');
-      return reply.code(503).send({ status: 'not-ready' });
+      const dependency = error instanceof DependencyReadinessError ? error.dependency : undefined;
+      app.log.warn({ errorType: error instanceof Error ? error.name : 'UnknownError',
+        ...(dependency ? { dependency } : {}) }, 'Dependency readiness check failed');
+      return reply.code(503).send({ status: 'not-ready', ...(dependency ? { dependency } : {}) });
     }
   });
   app.get('/auth/config', async (_request, reply) => {
@@ -97,28 +105,30 @@ export async function createGateway(config: RuntimeConfig, dependencies: Gateway
     protectedRoutes.addHook('onRequest', async (request, reply) => {
       const token = bearerToken(request.headers.authorization);
       if (!token) return reply.code(401).send({ error: 'Bearer access token required' });
+      let identity: UserIdentity;
       try {
-        const identity = await dependencies.verifyUser(token);
-        if (config.profile === 'role-based-data' && !identity.roles?.includes(config.requiredRole!)) {
-          return reply.code(403).send({ error: 'Authorized role required' });
-        }
-        const authenticated = request as AuthenticatedRequest;
-        authenticated.identity = identity;
-        authenticated.accessToken = token;
-        if (dependencies.telemetry && request.routeOptions.url !== '/diagnostics/traces' &&
-            !(request.method === 'GET' && request.routeOptions.url === '/jobs')) {
-          authenticated.traceSpan = dependencies.telemetry.begin(identity, `${request.method} ${request.routeOptions.url}`);
-        }
+        identity = await dependencies.verifyUser(token);
       } catch (error) {
         request.log.warn({ errorType: error instanceof Error ? error.name : 'UnknownError' }, 'Access token rejected');
         return reply.code(401).send({ error: 'Invalid access token' });
+      }
+      const authenticated = request as AuthenticatedRequest;
+      authenticated.identity = identity;
+      authenticated.accessToken = token;
+      if (request.routeOptions.url !== '/auth/me' && !accessFor(identity, requiredRole).allowed) {
+        return reply.code(403).send({ error: 'Authorized role required' });
+      }
+      if (dependencies.telemetry && request.routeOptions.url !== '/diagnostics/traces' &&
+          !(request.method === 'GET' && request.routeOptions.url === '/jobs')) {
+        authenticated.traceSpan = dependencies.telemetry.begin(identity, `${request.method} ${request.routeOptions.url}`);
       }
     });
     protectedRoutes.addHook('onSend', async (_request, reply) => {
       reply.header('cache-control', 'no-store');
     });
     protectedRoutes.get('/auth/me', async request => {
-      return (request as AuthenticatedRequest).identity;
+      const identity = (request as AuthenticatedRequest).identity!;
+      return { ...identity, access: accessFor(identity, requiredRole) };
     });
     protectedRoutes.route({
       method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
@@ -129,8 +139,13 @@ export async function createGateway(config: RuntimeConfig, dependencies: Gateway
     if (config.profile !== 'role-based-data') {
     protectedRoutes.get('/storage', async (request, reply) => {
       if (!dependencies.files.list) return reply.code(503).send({ error: 'File listing unavailable' });
+      const query = z.strictObject({ continuationToken: z.string().min(1).max(2048).optional() }).safeParse(request.query);
+      if (!query.success) return reply.code(400).send({ error: 'Invalid file continuation token' });
       const identity = (request as AuthenticatedRequest).identity!;
-      return { files: await dependencies.files.list(`${identity.tenantId}/${identity.oid}/`) };
+      return dependencies.files.list(`${identity.tenantId}/${identity.oid}/`, {
+        ...(query.data.continuationToken ? { continuationToken: query.data.continuationToken } : {}),
+        maxPageSize: 100,
+      });
     });
     protectedRoutes.get('/jobs', async (request, reply) => {
       if (!dependencies.processing) return reply.code(503).send({ error: 'File processing unavailable' });
@@ -184,7 +199,7 @@ export async function createGateway(config: RuntimeConfig, dependencies: Gateway
       });
       reply.code(response.status);
       reply.header('content-type', response.headers.get('content-type') ?? 'application/json');
-      return reply.send(Buffer.from(await response.arrayBuffer()));
+      return reply.send(response.body ?? undefined);
     }
 
     if (config.profile !== 'role-based-data') {
@@ -224,7 +239,8 @@ export async function createGateway(config: RuntimeConfig, dependencies: Gateway
         redirect: 'error',
         signal: AbortSignal.timeout(30_000),
       });
-      return reply.code(response.status).type('application/json').send(Buffer.from(await response.arrayBuffer()));
+      return reply.code(response.status).type('application/json')
+        .send(response.body ?? undefined);
     });
     }
   });

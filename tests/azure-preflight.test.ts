@@ -58,6 +58,7 @@ function harness(options: {
         'Microsoft.ContainerRegistry': ['registries'],
         'Microsoft.ManagedIdentity': ['userAssignedIdentities'],
         'Microsoft.Authorization': ['roleAssignments'],
+        'Microsoft.Web': ['staticSites', 'staticSites/linkedBackends'],
       };
       return Response.json({ namespace: provider, registrationState: options.provider === provider ? 'NotRegistered' : 'Registered',
         resourceTypes: types[provider]!.map(resourceType => ({ resourceType, locations: [options.wrongRegion ? 'West Europe' : 'East US'] })) });
@@ -154,7 +155,57 @@ test('ARM transient failures retry narrowly and stop at a bounded count', async 
 test('CLI exposes separate read-only demo diagnostics without requiring full-foundation configuration', async () => {
   const output = await run(process.execPath, ['dist/src/cli.js', 'help']);
   assert.match(output, /demo-preflight/);
+  assert.doesNotMatch(output, /Run npm run build/, 'help must not bypass the guarded consent-run build path');
   await assert.rejects(run(process.execPath, ['dist/src/cli.js', 'demo-preflight']), /explicit.*target configuration/i);
+});
+
+test('CLI reports configuration schema problems as readable paths, not raw JSON issue dumps', async t => {
+  const { mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const directory = await mkdtemp(join(tmpdir(), 'sql-apps-zod-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'bad.json');
+  await writeFile(path, JSON.stringify({ ...JSON.parse(await readFile('azure-role-based.example.json', 'utf8')), bogusKey: 1 }));
+  await assert.rejects(run(process.execPath, ['dist/src/cli.js', 'validate', path]), (error: Error) =>
+    /bogusKey/.test(error.message) && !error.message.includes('"code"'));
+});
+
+test('offline validate compares the Azure role-based config with role-based-data.json and requires declared procedures', async t => {
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import('node:fs/promises');
+  const { join, resolve } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { execFile } = await import('node:child_process');
+  const cli = resolve('dist/src/cli.js');
+  const example = JSON.parse(await readFile('azure-role-based.example.json', 'utf8'));
+  const dab = JSON.parse(await readFile('dab/dab-config.json', 'utf8'));
+  dab.entities = { ShiftsReady: { source: { object: 'dbo.ShiftsReady', type: 'stored-procedure' },
+    rest: { enabled: true, methods: ['get'] }, graphql: false, permissions: [{ role: 'Volunteer', actions: ['execute'] }] } };
+  const directory = await mkdtemp(join(tmpdir(), 'sql-apps-rb-validate-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, 'dab'));
+  await mkdir(join(directory, 'sql'));
+  await writeFile(join(directory, 'dab', 'dab-config.json'), JSON.stringify(dab));
+  await writeFile(join(directory, 'role-based-data.json'),
+    JSON.stringify({ profile: 'role-based-data', requiredRole: 'Volunteer', readinessPath: '/api/ShiftsReady' }));
+  const validate = (config: unknown) => writeFile(join(directory, 'azure.json'), JSON.stringify(config)).then(() =>
+    new Promise<{ code: number; output: string }>(done => execFile(process.execPath, [cli, 'validate', 'azure.json'], { cwd: directory },
+      (error, stdout, stderr) => done({ code: error ? Number(error.code) : 0, output: stdout + stderr }))));
+
+  const stale = await validate(example);
+  assert.notEqual(stale.code, 0);
+  assert.match(stale.output, /requiredRole.*AppUser.*Volunteer.*role-based-data\.json/s);
+
+  const aligned = { ...example, requiredRole: 'Volunteer', readinessPath: '/api/ShiftsReady' };
+  const missing = await validate(aligned);
+  assert.notEqual(missing.code, 0, 'validate must not pass before artifacts/provision when a DAB procedure is absent from sql/');
+  assert.match(missing.output, /dbo\.ShiftsReady/);
+  assert.match(missing.output, /sql\//);
+
+  await writeFile(join(directory, 'sql', 'ShiftsReady.sql'), 'CREATE PROCEDURE dbo.ShiftsReady AS SELECT 1;');
+  const valid = await validate(aligned);
+  assert.equal(valid.code, 0, valid.output);
+  assert.match(valid.output, /Configuration valid/);
 });
 
 test('permission pagination follows same-scope pages before deciding that write access is missing', async () => {

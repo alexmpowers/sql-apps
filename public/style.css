@@ -3,7 +3,8 @@ main { max-width: 48rem; margin: 3rem auto; padding: 2rem; background: white; bo
 button, input, select { font: inherit; padding: .6rem; margin: .25rem; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .65; }
-#local-identity { background: #fff4d6; padding: 1rem; border: 1px solid #d6aa37; border-radius: .5rem; }
+#auth-notice { background: #fff4d6; padding: 1rem; border: 1px solid #d6aa37; border-radius: .5rem; }
 form { margin: 1rem 0; }
 #status { min-height: 1.5rem; }
 li { padding: .5rem 0; }
+#jobs li { overflow-wrap: anywhere; }

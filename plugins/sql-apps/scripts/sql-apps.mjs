@@ -81,17 +81,30 @@ export async function status(fetcher = fetch, origins = { app: 'http://127.0.0.1
 const commands = new Set(['app', 'serve', 'serve-sql', 'role-based-app', 'role-based-serve', 'services', 'stop-services', 'maintain',
   'start-sql', 'verify', 'init', 'test', 'data', 'api-test', 'app-test', 'app-check', 'services-test', 'stop',
   'workspace-plan', 'workspace-init', 'recover-sql', 'selected-app', 'selected-serve', 'selected-stop', 'selected-test']);
+const consentCommands = new Set(['consent-plan', 'consent-status', 'consent-grant', 'consent-grant-once',
+  'consent-terms', 'consent-revoke', 'consent-run']);
 
 export async function main(args = process.argv.slice(2)) {
   const [command = 'help', container = 'sql-apps-sql'] = args;
-  if (args.length > 2) throw new Error('Expected a command and its optional selection');
+  const journey = command === 'setup';
+  if (!journey && !consentCommands.has(command) && args.length > 2) throw new Error('Expected a command and its optional selection');
   if (command === 'help') {
     console.log('SQL Apps local plugin: home | workspace-check | guide | guide-save <absolute-brief.json> | status | setup-check [existing-sql-container] | ' + [...commands].join(' | '));
     console.log('role-based-setup-check [existing-sql-container] checks only role-based-data service ports before build. Local commands use the configured checkout; no cloud deployment command is exposed.');
+    console.log('Pre-build consent: consent-plan|consent-status|consent-run <operation> [selection] | consent-grant|consent-grant-once <absolute-plan.json> | consent-terms <absolute-reviewed-document> | consent-revoke [scope|terms]. Record only explicitly approved scopes.');
+    console.log('Pre-build journey: setup plan|status|run|resume --profile foundation|role-based-data [--workspace <base-port|legacy>] [--json]; setup approval|approve --profile <profile> [--workspace <n>] [--approval <id>] is the one local approval; setup install-plan <tool> | setup install <absolute-reviewed-plan.json>. Install only after explicit approval.');
     return;
   }
-  if (!['home', 'workspace-check', 'guide', 'guide-save', 'status', 'setup-check', 'role-based-setup-check'].includes(command) && !commands.has(command)) throw new Error(`Unsupported plugin command: ${command}`);
-  if (command === 'guide-save') {
+  if (!['home', 'workspace-check', 'guide', 'guide-save', 'status', 'setup-check', 'role-based-setup-check', 'setup'].includes(command) && !commands.has(command) && !consentCommands.has(command)) throw new Error(`Unsupported plugin command: ${command}`);
+  if (journey) {
+    if (args.length > 10) throw new Error('Too many setup arguments');
+  } else if (consentCommands.has(command)) {
+    if (['consent-plan', 'consent-status', 'consent-run'].includes(command)) {
+      if (args.length < 2 || args.length > 3) throw new Error('Provide an operation and its optional selection');
+    } else if (command === 'consent-revoke') {
+      if (args.length > 2) throw new Error('Provide at most one consent scope');
+    } else if (args.length !== 2 || !isAbsolute(container)) throw new Error('Provide one absolute reviewed document/plan path');
+  } else if (command === 'guide-save') {
     if (args.length !== 2 || !isAbsolute(container)) throw new Error('Provide an absolute project brief JSON path');
   } else if (command === 'guide') {
     if (args.length !== 1) throw new Error('guide takes no arguments');
@@ -121,18 +134,20 @@ export async function main(args = process.argv.slice(2)) {
   }
   const guided = command === 'guide' || command === 'guide-save';
   const setup = command === 'setup-check' || command === 'role-based-setup-check';
-  const cli = guided ? join(home, 'scripts', 'guide.mjs') :
+  const consent = consentCommands.has(command);
+  const cli = journey ? join(home, 'scripts', 'setup.mjs') : consent ? join(home, 'scripts', 'local-consent.mjs') : guided ? join(home, 'scripts', 'guide.mjs') :
     setup ? join(home, 'scripts', 'setup-check.mjs') : join(home, 'dist', 'src', 'local-cli.js');
   try { await access(cli); }
   catch (error) {
-    throw new Error(guided ? 'Guide missing from the bound checkout; obtain the updated project.' :
+    throw new Error(journey ? 'Setup coordinator missing from the bound checkout; obtain the updated project.' : consent ? 'Consent commands missing from the bound checkout; obtain the updated project.' : guided ? 'Guide missing from the bound checkout; obtain the updated project.' :
       setup ? 'Setup diagnostic missing from the bound checkout; obtain the updated project.' :
-      'Local CLI not built. Run npm run build in the configured checkout', { cause: error });
+      'Local CLI not built. Review consent-plan build, then after approval use consent-run build in the configured checkout', { cause: error });
   }
-  if (!guided && !setup && !workspace.bound.build.ready) {
+  if (!journey && !guided && !setup && !consent && !workspace.bound.build.ready) {
     throw new Error(`Runtime build is not verified: ${workspace.bound.build.code}. ${workspace.bound.build.nextAction}`);
   }
-  const childArgs = guided ? [cli, ...(command === 'guide-save' ? ['--save', container] : []), '--json'] :
+  const childArgs = journey ? [cli, ...args.slice(1)] : consent ? [cli, command.replace('consent-', ''), ...args.slice(1)] :
+    guided ? [cli, ...(command === 'guide-save' ? ['--save', container] : []), '--json'] :
     setup ? [cli, '--json', ...(command === 'role-based-setup-check' ? ['--profile', 'role-based-data'] : []),
       ...(args.length === 2 ? ['--container', container] : [])] :
     [cli, command, ...(args.length === 2 ? [container] : [])];

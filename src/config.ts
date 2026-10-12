@@ -2,6 +2,18 @@ import { z } from 'zod';
 import { requiredRoleSchema, readinessPathSchema } from './role-based-profile.js';
 
 const uuid = z.string().uuid();
+const httpsOrigin = z.url().superRefine((value, context) => {
+  const url = new URL(value);
+  if (url.protocol !== 'https:') {
+    context.addIssue({ code: 'custom', message: 'Cloud service URLs must use HTTPS' });
+  }
+  if (url.username || url.password) {
+    context.addIssue({ code: 'custom', message: 'Cloud service URLs must not contain credentials' });
+  }
+  if (url.pathname !== '/' || url.search || url.hash) {
+    context.addIssue({ code: 'custom', message: 'Cloud service URLs must be origins without a path, query, or fragment' });
+  }
+});
 const image = z.string().regex(
   /^[a-z0-9.-]+(?::[0-9]+)?\/[a-z0-9._/-]+(?::[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$/,
   'Use a registry/repository with an explicit version or sha256 digest',
@@ -47,10 +59,10 @@ export const runtimeSchema = z.strictObject({
   readinessPath: readinessPathSchema.optional(),
   tenantId: uuid,
   apiClientId: uuid,
-  dabUrl: z.url(),
-  blobAccountUrl: z.url(),
+  dabUrl: httpsOrigin,
+  blobAccountUrl: httpsOrigin,
   blobContainer: z.string().regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/),
-  functionsUrl: z.url(),
+  functionsUrl: httpsOrigin,
   publicDirectory: z.string().min(1),
 }).superRefine((config, context) => {
   if (config.profile === 'role-based-data' && (!config.requiredRole || !config.readinessPath)) {

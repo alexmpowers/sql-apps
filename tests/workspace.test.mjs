@@ -72,14 +72,36 @@ test('missing uncommitted foundation in an active checkout is reported, not copi
 test('build provenance detects missing, changed source and tampered artifacts', async t => {
   const home = await fixture(t);
   const { inspectSource, recordBuild } = await load();
+  const guarded = build => {
+    assert.match(build.nextAction, /consent-run build/);
+    assert.doesNotMatch(build.nextAction, /run npm run build/, 'raw build advice bypasses the guarded approval path');
+  };
+  guarded((await inspectSource(home)).build);
   assert.equal((await inspectSource(home)).build.code, 'BUILD_UNVERIFIED');
   await recordBuild(home);
   assert.equal((await inspectSource(home)).build.code, 'BUILD_CURRENT');
   await writeFile(join(home, 'src', 'local-cli.ts'), 'export const source = 2;');
   assert.equal((await inspectSource(home)).build.code, 'BUILD_SOURCE_MISMATCH');
+  guarded((await inspectSource(home)).build);
   await recordBuild(home);
   await writeFile(join(home, 'dist', 'src', 'local-cli.js'), 'console.log("different");');
   assert.equal((await inspectSource(home)).build.code, 'BUILD_ARTIFACT_MISMATCH');
+  guarded((await inspectSource(home)).build);
+});
+
+test('build provenance attests the generated callback without treating it as source', async t => {
+  const home = await fixture(t);
+  const { inspectSource, recordBuild } = await load();
+  await mkdir(join(home, 'public', 'auth'), { recursive: true });
+  const callback = join(home, 'public', 'auth', 'redirect.js');
+  await writeFile(callback, 'export const bridge = 1;');
+  const before = (await inspectSource(home)).fingerprint;
+  await recordBuild(home);
+  assert.equal((await inspectSource(home)).build.code, 'BUILD_CURRENT');
+  await writeFile(callback, 'export const bridge = 2;');
+  const after = await inspectSource(home);
+  assert.equal(after.fingerprint, before);
+  assert.equal(after.build.code, 'BUILD_ARTIFACT_MISMATCH');
 });
 
 test('source fingerprint excludes credentials, state and dependencies', async t => {

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Development identity testing - SQL Apps</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main>
+      <h1>Development identity testing</h1>
+      <p>Local-only simulation. These are test identities, not Microsoft accounts or production sign-in.</p>
+      <p>Switching revokes this tab's previous preview session. Application roles are assigned by the local server.</p>
+      <form id="identity-form">
+        <label for="development-user">Test identity</label>
+        <select id="development-user" required></select>
+        <button id="select-user" disabled>Use identity and return to app</button>
+      </form>
+      <p id="development-status" role="status" aria-live="polite"></p>
+      <a href="/">Return without switching</a>
+    </main>
+    <script type="module" src="/__dev/identity.js"></script>
+  </body>
+</html>

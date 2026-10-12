@@ -23,8 +23,17 @@ try {
 }
 const { build } = await import('esbuild');
 await copyFile(resolve(home, 'src', 'workspace.mjs'), resolve(home, 'dist', 'src', 'workspace.mjs'));
+await copyFile(resolve(home, 'src', 'file-lock.mjs'), resolve(home, 'dist', 'src', 'file-lock.mjs'));
+await copyFile(resolve(home, 'src', 'local-consent.mjs'), resolve(home, 'dist', 'src', 'local-consent.mjs'));
+await copyFile(resolve(home, 'src', 'local-auth.mjs'), resolve(home, 'dist', 'src', 'local-auth.mjs'));
+await copyFile(resolve(home, 'src', 'role-based-rules.mjs'), resolve(home, 'dist', 'src', 'role-based-rules.mjs'));
 await mkdir(resolve(home, 'dist', 'scripts'), { recursive: true });
 await copyFile(resolve(home, 'scripts', 'workspace-check.mjs'), resolve(home, 'dist', 'scripts', 'workspace-check.mjs'));
-await build({ absWorkingDir: home, entryPoints: ['src/web/app.ts'], bundle: true, format: 'esm', outfile: 'public/app.js' });
+await build({ absWorkingDir: home, entryPoints: { app: 'src/web/app.ts', 'auth/redirect': 'src/web/auth-redirect.ts' },
+  bundle: true, format: 'esm', outdir: 'public' });
+await mkdir(resolve(home, 'dist', 'src', 'web'), { recursive: true });
+await copyFile(resolve(home, 'src', 'web', 'developer.html'), resolve(home, 'dist', 'src', 'web', 'developer.html'));
+await build({ absWorkingDir: home, entryPoints: [resolve(home, 'src', 'web', 'developer.ts')],
+  bundle: true, format: 'esm', outfile: resolve(home, 'dist', 'src', 'web', 'developer.bundle.js') });
 await recordBuild(home, source.fingerprint);
 console.log('Runtime built; source and artifact provenance recorded.');

@@ -6,13 +6,14 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { run } from '../src/process.js';
 import { testLocalApp } from '../src/local-app-smoke.js';
+import { runtimeFor } from '../src/workspace.mjs';
 
 const checker = resolve('scripts/check-application.mjs');
 
 test('clean application validation rejects leftovers in each actual delivery surface', async t => {
   const root = await mkdtemp(join(tmpdir(), 'sql-apps-clean-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const dir of ['src', 'public', 'dab', 'sql', 'dist/src', 'dist/functions', 'functions']) await mkdir(join(root, dir), { recursive: true });
+  for (const dir of ['src', 'public', 'dab', 'sql', 'tests', 'dist/tests', 'dist/src', 'dist/functions', 'functions']) await mkdir(join(root, dir), { recursive: true });
   await writeFile(join(root, 'application.json'), JSON.stringify({ name: 'test-app', selectedExamples: [] }));
   await writeFile(join(root, 'public/app.js'), 'console.log("orders");');
   await mkdir(join(root, 'dist/functions/src'), { recursive: true });
@@ -41,6 +42,27 @@ test('clean application validation rejects leftovers in each actual delivery sur
     await assert.rejects(run(process.execPath, [checker, root]), /Unselected Todo example/);
     await writeFile(join(root, path), '');
   }
+  for (const [path, content] of [
+    ['tests/inherited.test.ts', 'import { application } from "../examples/todo/application.js";'],
+    ['tests/inherited.test.ts', 'const application = await import("../examples/todo/application.js");'],
+    ['tests/inherited.test.ts', 'const sql = await readFile("examples/todo/demo/schema.sql", "utf8");'],
+    ['tests/inherited.test.ts', 'const sql = await readFile(join("examples", "todo", "schema.sql"), "utf8");'],
+    ['tests/inherited.test.ts', 'const file = "examples/todo/schema.sql"; await readFile(file, "utf8");'],
+    ['tests/inherited.test.ts', 'for (const file of ["examples/todo/schema.sql"]) await readFile(file, "utf8");'],
+    ['tests/inherited.test.ts', 'export { application } from "../examples/inventory/application.js";'],
+    ['dist/tests/inherited.test.js', 'import { application } from "../examples/todo/application.js";'],
+  ]) {
+    await writeFile(join(root, path!), content!);
+    await assert.rejects(run(process.execPath, [checker, root]), /Unselected example dependency.*tests[\\/]/s);
+    await writeFile(join(root, path!), '');
+  }
+  await writeFile(join(root, 'tests/absence.test.ts'), `
+// TODO: keep the negative regression check.
+assert.equal(await databaseObjectExists('dbo.Todos'), false);
+assert.equal((await request('/api/Todo')).statusCode, 404);
+const fixture = 'import { application } from "../examples/todo/application.js";';
+`);
+  assert.match(await run(process.execPath, [checker, root]), /Clean application passed/);
   await writeFile(join(root, 'model.xml'), '<Element Name="[dbo].[Todos]" />');
   await assert.rejects(run(process.execPath, [checker, root, join(root, 'model.xml')]), /Unselected Todo example/);
   await writeFile(join(root, 'model.xml'), '<Element Name="[dbo].[Orders]" />');
@@ -61,9 +83,26 @@ test('clean application validation rejects leftovers in each actual delivery sur
   await assert.rejects(run(process.execPath, [checker, root]), /ENOENT/);
 });
 
+test('example test runner skips absent examples but runs and propagates selected example failures', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sql-apps-example-tests-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runner = resolve('scripts/test-examples.mjs');
+  assert.match(await run(process.execPath, [runner, root]), /No optional example tests/);
+  await mkdir(join(root, 'examples', 'inventory', 'tests'), { recursive: true });
+  await writeFile(join(root, 'examples', 'inventory', 'tests', 'workflow.test.ts'), '// source test');
+  await assert.rejects(run(process.execPath, [runner, root]), /Missing compiled example test/);
+  await mkdir(join(root, 'dist', 'examples', 'inventory', 'tests'), { recursive: true });
+  const compiled = join(root, 'dist', 'examples', 'inventory', 'tests', 'workflow.test.js');
+  await writeFile(compiled, 'throw new Error("Example workflow failure");');
+  await assert.rejects(run(process.execPath, [runner, root]), /Example workflow failure/);
+  await writeFile(compiled, 'console.log("Example workflow passed");');
+  assert.match(await run(process.execPath, [runner, root]), /Example workflow passed/);
+});
+
 test('API cleanliness requires missing entities, not auth/backend errors, and always cleans its session', async () => {
   const moduleUrl = pathToFileURL(resolve('scripts/check-application-api.mjs')).href;
   const { checkApplicationApi } = await import(moduleUrl);
+  const origin = runtimeFor().origins.app;
   const cases = [
     { rest: 404, graph: 400, body: { errors: [{ message: "Cannot query field 'todos'." }] }, succeeds: true },
     { rest: 200, graph: 400, body: { errors: [{ message: "Cannot query field 'todos'." }] }, succeeds: false },
@@ -77,7 +116,7 @@ test('API cleanliness requires missing entities, not auth/backend errors, and al
     let cleaned = false;
     const fetcher = async (url: string, options: RequestInit) => {
       const headers = new Headers(options.headers);
-      assert.equal(headers.get('origin'), 'http://127.0.0.1:18080');
+      assert.equal(headers.get('origin'), origin);
       if (options.method === 'DELETE') {
         cleaned = true;
         assert.equal(headers.get('content-type'), null, 'Bodyless cleanup must not claim to be JSON');

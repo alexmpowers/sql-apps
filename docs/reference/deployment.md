@@ -16,6 +16,8 @@ Run the validation commands in [Contributing](../../CONTRIBUTING.md) first. Sign
 
 The runtime uses stateless bearer tokens. User tokens must be v2 access tokens for the configured API, with the `access_as_user` scope. Functions require an application token with `Function.Invoke` and the exact gateway managed-identity principal. No caller-supplied identity headers are trusted.
 
+`DAB_URL`, `FUNCTIONS_URL` and `BLOB_ACCOUNT_URL` must be exact HTTPS origins without embedded credentials, paths, queries or fragments. Runtime validation fails before startup rather than forwarding a bearer token to an insecure or ambiguous endpoint.
+
 DAB returns relative REST continuation links so clients remain on the public gateway origin. The isolated Todo example tests pagination, preserving opaque tokens and rejecting unsafe links; it is not part of application delivery. Application-specific clients need equivalent pagination validation.
 
 Develop and verify the SQL/data layer first using [local development](local-development.md), without provisioning cloud resources. Local claim simulation must never be deployed; cloud DAB continues to validate Entra bearer tokens.
@@ -42,16 +44,41 @@ npm run azure -- artifacts sql-apps.json
 Alternatively use the underlying standard Azure CLI commands:
 
 ```powershell
-az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps:0.1.0 --file Dockerfile .
-az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps-dab:0.1.0 --file dab/Dockerfile .
-az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps-functions:0.1.0 --file functions/Dockerfile .
+az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps:0.1.1 --file Dockerfile .
+az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps-dab:0.1.1 --file dab/Dockerfile .
+az acr build --subscription <subscription-id> --registry <registry-name> --image sql-apps-functions:0.1.1 --file functions/Dockerfile .
 ```
 
 ACR tasks require suitable Azure permissions and may have region/subscription restrictions. Images are not built by `deploy`. Use immutable digests for release, not tags that are overwritten. Publishing code to a registry is an explicit operator action.
 
+## Shortest path
+
+After `az login` as the person who will administer SQL, generate a configuration
+read-only; tenant, subscription, SQL administrator and (for `role-based-data`)
+role settings are derived, so only placement is asked for:
+
+```powershell
+npm run azure -- init sql-apps.json --profile foundation --location eastus --resource-group rg-sql-apps-dev --registry <name>.azurecr.io
+npm run azure -- deploy-all sql-apps.json
+```
+
+`deploy-all` without `--approve` only lists the pending paid steps (`identity`,
+`artifacts`, `provision`, `deploy`, `status`), the exclusions and an id. Review
+costs (`demo-cost`/`role-based-cost`) and those steps, then, after explicit
+approval, run `deploy-all sql-apps.json --approve <id>`. It runs the existing
+commands below in order, skips completed ones and refuses a stale id. On a
+failure, such as no private-network path to SQL before `deploy`, fix the cause
+and rerun it to resume. Role assignment and smoke tests stay separate.
+
+Completed stages are skipped only when their saved fingerprint still matches
+the configuration and, for `role-based-data`, the SQL/DAB source. Changed image
+digests or role-based schema inputs stop `deploy-all` before any child command.
+Review that release change separately; do not delete saved state to force a
+resume or treat an old healthy gateway as the changed release.
+
 ## Entra configuration
 
-Copy [the example](../../sql-apps.example.json) to `sql-apps.json`. Fill in the target tenant/subscription, SQL administrator, resource group/region, and images.
+Copy [the example](../../sql-apps.example.json) to `sql-apps.json`, or use `init` above. Fill in the target tenant/subscription, SQL administrator, resource group/region, and images.
 
 The starter uses `"name": "sqlapps"`. With environment `dev`, the gateway's Azure-generated hostname starts with `sqlapps-dev-gateway.`; the Functions hostname starts with `sqlapps-dev-fn-`. Azure supplies the remaining domain/suffix, so use the actual deployment outputs rather than constructing a URL yourself. Image repository names can remain `sql-apps`; they do not determine the browser URL.
 
@@ -63,13 +90,13 @@ Create a dedicated app registration once:
 npm run azure -- identity sql-apps.json
 ```
 
-This is an explicit create operation, not an idempotent lookup by display name. It creates one single-tenant SPA/API registration, a delegated `access_as_user` scope, a `Function.Invoke` application role, and a service principal. Replace `apiClientId` in your real configuration with the printed ID.
+This is an explicit create operation, not an idempotent lookup by display name. It creates one single-tenant SPA/API registration, a delegated `access_as_user` scope, a `Function.Invoke` application role, and a service principal. When the configuration came from `init` (placeholder `apiClientId`), the printed ID is saved into it; otherwise replace `apiClientId` in your real configuration with the printed ID.
 
 For a `role-based-data` configuration, `identity` instead creates the configured human role such as `AppUser` with allowed member type `User`; `role-based-assign` explicitly assigns approved users/groups. Verify API access-token role claims, trusted gateway-selected DAB role, entity/procedure permissions and SQL grants end to end with `role-based-smoke` and browser acceptance. Local simulation and app-side role enforcement alone do not prove Entra/cloud authorization.
 
 An account email address is not a tenant ID. Confirm the intended directory's tenant ID, or retrieve it with an authorized read-only account query, before tenant-specific sign-in. Do not change subscription defaults or repeat generic login instructions to resolve that mismatch.
 
-The registration requests v2 access tokens. The same registration is used by the browser and API. Initial local redirect: `http://localhost:8080`. Deployment adds its HTTPS origin without removing existing redirects. An Entra administrator may need to grant consent under your tenant's policy.
+The registration requests v2 access tokens. The same registration is used by the browser and API. Deployment adds the exact HTTPS `/auth/redirect.html` callback on the actual gateway origin without removing existing redirects. Real local sign-in uses a separately reviewed development registration and the printed loopback callback; see [Authentication and application access](authentication.md). An Entra administrator may need to grant consent under your tenant's policy.
 
 Alternatively configure an existing dedicated registration with the same scope and application role:
 
@@ -119,7 +146,7 @@ Deployment sequence:
 2. Publish the DACPAC with `BlockOnPossibleDataLoss=True` and `DropObjectsNotInSource=False`.
 3. Grant the gateway's function invocation role if absent.
 4. Deploy data and gateway apps.
-5. Add the HTTPS SPA redirect.
+5. Add the exact HTTPS SPA callback at `/auth/redirect.html` on the actual gateway origin, preserving existing redirect URIs.
 6. Probe data-service readiness through the gateway.
 
 Local state is keyed by subscription/group/app/environment under `.sql-apps`. A local exclusive lock prevents simultaneous commands from this checkout. CI must also use an environment concurrency group.
@@ -142,3 +169,13 @@ Use two distinct Entra workforce users:
 8. Run DAB's full configuration/database validation in the private environment. JSON schema validation alone is insufficient.
 
 No live acceptance is implied by `npm test`; its Azure/Blob/DAB dependencies are controlled test doubles.
+
+## Browser sign-in contract
+
+Follow **Build -> Sign in -> Give access -> Publish** and the [canonical authentication reference](authentication.md). The dedicated MSAL v5 bridge is `/auth/redirect.html`, not the application root. Register the exact HTTPS callback on the actual deployed gateway origin, including its path, before accepting a new browser build with an existing registration. Preserve previously approved redirect URIs. The bridge runs only its redirect script, makes no application API calls and must not receive a `Cross-Origin-Opener-Policy` header.
+
+Public browser configuration exposes only the minimal sign-in settings, never tokens, storage credentials or service secrets. The gateway verifies signature, issuer, audience, expiry, tenant, `oid` and the delegated `access_as_user` scope. Required human application roles come from verified token claims, not caller headers. Verify approved role assignments, DAB entity/procedure permissions, SQL grants and any `oid`/`tid` owner restrictions end to end.
+
+`/auth/me` reports HTTP 200 verified identity and access even for an account without the required role; its domain requests receive HTTP 403 before DAB. An access-denied account can still sign out. HTTP 401 clears owner-specific browser data and stops authenticated requests; HTTP 403 is an operation denial, not logout. A backend outage remains a separate retryable failure and keeps the authorized account signed in.
+
+Container Apps is the current supported hosting implementation. This authentication change does not provision a Static Web App, migrate hosting or implement the preferred future App Service target. EasyAuth and Static Web Apps client-principal headers are not an adapter shortcut for this verified delegated-token contract, and their roles do not grant SQL access. Hosting alternatives require a separate integration, networking/identity/readiness/cost review, deployment and rollback plan, and approval.

@@ -20,6 +20,7 @@ const metadata = z.object({
   routes: z.array(route).min(1),
   inputs: z.strictObject({
     browser: path, html: path, css: path, sqlProject: path, sqlFiles: z.array(path).min(1), grants: path, dab: path,
+    publicAcceptance: path,
   }),
   procedures: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/)).min(1),
   sessions: z.strictObject({ create: z.string(), get: z.string(), delete: z.string(), ready: z.string() }),
@@ -134,15 +135,26 @@ export const createApplication = (options, fetcher) => createDemoApplication(app
       }
       const required = [join(sourceRoot, 'application.ts'), ...[
         definition.inputs.browser, definition.inputs.html, definition.inputs.css, definition.inputs.sqlProject,
-        ...definition.inputs.sqlFiles, definition.inputs.grants, definition.inputs.dab,
-      ].map(input => join(sourceRoot, input))];
+        ...definition.inputs.sqlFiles, definition.inputs.grants, definition.inputs.dab, definition.inputs.publicAcceptance,
+      ].map(input => join(sourceRoot, input)), ...(profile === 'public-demo' ? ['public/staticwebapp.config.json'] : [])];
       const sources = await snapshots(home, [...required, ...bundled, 'package.json', 'package-lock.json']);
-      for (const folder of ['public', 'sql', 'setup', 'dab']) await mkdir(join(temporary, folder));
+      for (const folder of ['public', 'static', 'sql', 'setup', 'dab']) await mkdir(join(temporary, folder));
       await build({
         absWorkingDir: home, entryPoints: [join(sourceRoot, definition.inputs.browser)],
         bundle: true, format: 'esm', outfile: join(temporary, 'public', 'app.js'), metafile: true,
       }).then(async browser => {
         const inputs = Object.keys(browser.metafile.inputs).filter(input => !input.split(/[\\/]/).includes('node_modules'));
+        checkImports(inputs);
+        const extra = await snapshots(home, inputs.filter(input => !sources.some(item => item.path === input.replaceAll('\\', '/'))));
+        sources.push(...extra);
+        sources.sort((a, b) => a.path.localeCompare(b.path, 'en'));
+      });
+      await mkdir(join(temporary, 'acceptance'));
+      await build({
+        absWorkingDir: home, entryPoints: [join(sourceRoot, definition.inputs.publicAcceptance)],
+        bundle: true, platform: 'node', format: 'esm', outfile: join(temporary, 'acceptance', 'public.mjs'), metafile: true,
+      }).then(async acceptance => {
+        const inputs = Object.keys(acceptance.metafile.inputs).filter(input => !input.split(/[\\/]/).includes('node_modules'));
         checkImports(inputs);
         const extra = await snapshots(home, inputs.filter(input => !sources.some(item => item.path === input.replaceAll('\\', '/'))));
         sources.push(...extra);
@@ -167,6 +179,13 @@ export const createApplication = (options, fetcher) => createDemoApplication(app
         await checkedFile(home, input!);
         await copyFile(join(home, input!), join(temporary, target!));
       }
+      if (profile === 'public-demo') {
+        for (const name of ['index.html', 'app.css', 'app.js']) {
+          await copyFile(join(temporary, 'public', name), join(temporary, 'static', name));
+        }
+        await copyFile(join(home, 'public', 'staticwebapp.config.json'),
+          join(temporary, 'static', 'staticwebapp.config.json'));
+      }
       const pkg = z.object({ scripts: z.record(z.string(), z.string()).optional() }).passthrough()
         .parse(JSON.parse(await readFile(join(home, 'package.json'), 'utf8')));
       await saveJson(join(temporary, 'package.json'), { ...pkg, scripts: { start: 'node server/start.mjs' } });
@@ -178,7 +197,9 @@ if (!['local-simulation', 'public-demo'].includes(profile)) throw new Error('Exp
 const port = Number(process.env.PORT);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Explicit valid PORT is required');
 if (!process.env.PUBLIC_ORIGIN || !process.env.DAB_URL) throw new Error('PUBLIC_ORIGIN and internal DAB_URL are required');
-const app = await createApplication({profile, origin:process.env.PUBLIC_ORIGIN, dabUrl:process.env.DAB_URL, publicDirectory:'public'});
+const publicDemo = profile === 'public-demo';
+const app = await createApplication({profile, origin:process.env.PUBLIC_ORIGIN, dabUrl:process.env.DAB_URL,
+  transport:publicDemo?'static-web-apps':'direct', ...(publicDemo?{}:{publicDirectory:'public'})});
 await app.listen({host:profile === 'public-demo' ? '0.0.0.0' : '127.0.0.1', port});
 for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => { void app.close(); });
 `);
@@ -193,8 +214,7 @@ for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => { void app
 !package-lock.json
 !server/
 !server/**
-!public/
-!public/**
+${profile === 'local-simulation' ? '!public/\n!public/**' : ''}
 !dab/
 !dab/**
 `);
@@ -208,7 +228,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --chown=node:node server ./server
-COPY --chown=node:node public ./public
+${profile === 'local-simulation' ? 'COPY --chown=node:node public ./public' : ''}
 ENV NODE_ENV=production PORT=8080
 USER node
 EXPOSE 8080

@@ -25,6 +25,7 @@ export interface ApplicationDefinition {
     sqlFiles: readonly string[];
     grants: string;
     dab: string;
+    publicAcceptance: string;
   };
   procedures: readonly string[];
   sessions: { create: string; get: string; delete: string; ready: string };
@@ -51,6 +52,11 @@ export async function composeApplication(
   }
   for (const capability of definition.capabilities) {
     if (!adapter.capabilities.includes(capability)) throw new Error(`Selected application requires capability ${capability}`);
+  }
+  for (const route of definition.routes) {
+    if (!route.path.startsWith('/api/')) {
+      throw new Error(`Public application routes must start with /api/: ${route.method} ${route.path}`);
+    }
   }
   const app = Fastify({
     bodyLimit: 4096, requestTimeout: 35_000, exposeHeadRoutes: false,
@@ -86,8 +92,8 @@ export async function composeApplication(
       });
       await definition.register(routes, adapter);
     });
-    app.get('/health/live', async () => ({ status: 'live' }));
-    app.get('/health/ready', async (_request, reply) => {
+    const live = async () => ({ status: 'live' });
+    const ready = async (_request: unknown, reply: { code(statusCode: number): { send(payload: unknown): unknown } }) => {
       try {
         await adapter.ready();
         return { status: 'ready', application: definition.name };
@@ -95,7 +101,11 @@ export async function composeApplication(
         app.log.warn({ errorType: error instanceof Error ? error.name : 'UnknownError' }, 'Selected application readiness failed');
         return reply.code(503).send({ status: 'not-ready', application: definition.name });
       }
-    });
+    };
+    app.get('/health/live', live);
+    app.get('/health/ready', ready);
+    app.get('/api/health/live', live);
+    app.get('/api/health/ready', ready);
     app.get('/application/manifest', async () => ({
       version: 1, name: definition.name, capabilities: [...definition.capabilities].sort(), routes: definition.routes,
     }));

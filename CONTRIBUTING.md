@@ -39,6 +39,18 @@ Use the [Feature Request](https://github.com/microsoft/sql-apps/issues/new?templ
 
 Validate changes with `npm test`, `npm run typecheck`, `npm run sql:build`, `npm run infra:build`, and `npm run dab:validate` as applicable. Include each exact command and result; distinguish local/mocked results from live Azure acceptance.
 
+Keep optional example workflow tests under `examples/<name>/tests`, not root
+`tests`. `npm test` runs all foundation tests and then tests for examples present
+in the checkout; absent examples are not restored. Domain applications retain
+their own workflow tests and negative legacy SQL/API absence checks. Targeted
+test results must not be reported as a full-suite pass.
+
+Local lifecycle unit tests must leave the developer's workspace, credentials,
+and containers untouched. Use temporary homes for legacy and isolated workspace
+fixtures, and derive ports, names, database users, and origins from `runtimeFor()`.
+Mocked isolated Docker inspections must include the matching workspace, image,
+and loopback port bindings; do not reset `.sql-apps` to make tests pass.
+
 Keep end-user walkthroughs in `docs/guides`, detailed commands in `docs/reference`, and contributor contracts in `docs/maintainers`. See the [documentation index](docs/README.md), [application boundaries](docs/maintainers/application-boundary.md) and [operations checks](docs/maintainers/operations.md).
 
 ## Commit Messages

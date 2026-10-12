@@ -6,6 +6,7 @@ export const demoTargetSchema = z.strictObject({
   profile: z.literal('public-demo'), tenantId: guid, subscriptionId: guid,
   resourceGroup: z.string().regex(/^[a-zA-Z0-9_().-]{1,90}$/).refine(value => !value.endsWith('.')),
   location: z.string().regex(/^[a-z][a-z0-9]{1,31}$/),
+  staticWebAppLocation: z.string().regex(/^[a-z][a-z0-9]{1,31}$/).optional(),
 });
 export type DemoTarget = z.infer<typeof demoTargetSchema>;
 type PreflightCode = 'TENANT_TOKEN_REQUIRED' | 'TOKEN_TENANT_MISMATCH' | 'TOKEN_EXPIRED' | 'TOKEN_FORMAT_INVALID' |
@@ -26,6 +27,7 @@ const providers = {
   'Microsoft.ContainerRegistry': ['registries'],
   'Microsoft.ManagedIdentity': ['userAssignedIdentities'],
   'Microsoft.Authorization': ['roleAssignments'],
+  'Microsoft.Web': ['staticSites', 'staticSites/linkedBackends'],
 } as const;
 
 async function cacheEvidence(target: DemoTarget, runner: Run) {
@@ -165,6 +167,10 @@ export async function preflightDemo(input: unknown, runner: Run, fetcher: typeof
   }
   const location = locations.find(item => item.name === target.location);
   if (!location) throw new DemoPreflightError('REGION_UNSUPPORTED', 'Selected region is not available to this subscription.');
+  const staticWebAppLocation = locations.find(item => item.name === (target.staticWebAppLocation ?? target.location));
+  if (!staticWebAppLocation) {
+    throw new DemoPreflightError('REGION_UNSUPPORTED', 'Selected Static Web Apps region is not available to this subscription.');
+  }
   const [permissions, availableProviders] = await Promise.all([
     list(`${group === null ? subscriptionScope : groupScope}/providers/Microsoft.Authorization/permissions`, '2022-04-01',
       z.object({ actions: z.array(z.string().max(256)), notActions: z.array(z.string().max(256)) })),
@@ -174,11 +180,14 @@ export async function preflightDemo(input: unknown, runner: Run, fetcher: typeof
       await arm(`${subscriptionScope}/providers/${namespace}`, '2021-04-01'), 'provider');
       if (provider.namespace !== namespace) throw new DemoPreflightError('ARM_INVALID_RESPONSE', 'ARM returned another provider namespace.');
       if (provider.registrationState !== 'Registered') throw new DemoPreflightError('PROVIDER_REGISTRATION_REQUIRED', `Provider ${namespace} needs explicit registration approval; it was not registered automatically.`);
+      const providerLocation = namespace === 'Microsoft.Web' ? staticWebAppLocation : location;
       for (const type of types) {
         const resource = provider.resourceTypes.find(item => item.resourceType.toLowerCase() === type.toLowerCase());
         const normalize = (value: string) => value.replace(/[\s-]/g, '').toLowerCase();
-        if (!resource || (namespace !== 'Microsoft.Authorization' &&
-            !resource.locations?.some(value => normalize(value) === normalize(location.displayName) || normalize(value) === target.location))) {
+        const requiresRegion = namespace !== 'Microsoft.Authorization' && type !== 'staticSites/linkedBackends';
+        if (!resource || (requiresRegion &&
+            !resource.locations?.some(value => normalize(value) === normalize(providerLocation.displayName) ||
+              normalize(value) === (namespace === 'Microsoft.Web' ? target.staticWebAppLocation ?? target.location : target.location)))) {
           throw new DemoPreflightError('REGION_UNSUPPORTED', `${namespace}/${type} does not advertise the selected region; no alternate region was selected.`);
         }
       }
@@ -194,6 +203,7 @@ export async function preflightDemo(input: unknown, runner: Run, fetcher: typeof
     'Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action',
     'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action',
     'Microsoft.ContainerRegistry/registries/scheduleRun/action', 'Microsoft.ContainerRegistry/registries/runs/read',
+    'Microsoft.Web/staticSites/listSecrets/action',
     ...(group === null ? ['Microsoft.Resources/subscriptions/resourceGroups/write'] : [])];
   const missing = actions.filter(action => !permissions.some(permission =>
     permission.actions.some(pattern => actionMatches(pattern, action)) && !permission.notActions.some(pattern => actionMatches(pattern, action))));

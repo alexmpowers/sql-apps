@@ -31,9 +31,15 @@ export function readWorkspace(root = process.cwd()) {
   return descriptor;
 }
 
-export function runtimeFor(container, root = process.cwd()) {
+// A proposed descriptor lets consent plans compute the same contracts before workspace-init writes it.
+export function describeWorkspace(root, selection) {
   const home = realpathSync(root);
-  const descriptor = readWorkspace(home);
+  return selection === 'legacy' ? { version: 1, mode: 'legacy', home, id: hash(home), basePort: null } : candidate(home, selection);
+}
+
+export function runtimeFor(container, root = process.cwd(), proposed) {
+  const home = realpathSync(root);
+  const descriptor = proposed ?? readWorkspace(home);
   const isolated = descriptor?.mode === 'isolated';
   const id = hash(home);
   const defaultSql = isolated ? `sql-apps-${id}-sql` : 'sql-apps-sql';
@@ -122,8 +128,7 @@ export async function proposeWorkspace(root = process.cwd(), probe = portState) 
 export async function initializeWorkspace(root = process.cwd(), selection, probe = portState) {
   const home = realpathSync(root);
   if (readWorkspace(home)) throw new Error('Workspace already selected; review existing state instead of overwriting its descriptor.');
-  const descriptor = selection === 'legacy' ? { version: 1, mode: 'legacy', home, id: hash(home), basePort: null } :
-    candidate(home, selection);
+  const descriptor = describeWorkspace(home, selection);
   if (descriptor.mode === 'isolated') {
     const ports = await inspectPorts(descriptor, probe);
     if (ports.some(port => port.state !== 'free')) throw new Error('Selected port block is occupied or unverifiable; rerun workspace-plan and approve a free alternative.');

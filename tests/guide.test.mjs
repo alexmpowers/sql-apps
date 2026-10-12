@@ -16,20 +16,11 @@ const brief = () => ({
   nextChange: 'Add a due-date field',
 });
 
-test('SQL Apps entry points explicitly scope standalone work while preserving other plugins', async () => {
-  const paths = [
-    'content/start.md',
-    'skills/sql-apps-getting-started/SKILL.md',
-    ...['application', 'local', 'diagnostics', 'validation', 'cloud-preview', 'frontend-design']
-      .map(name => `plugins/sql-apps/skills/sql-apps-${name}/SKILL.md`),
-  ];
-  for (const path of paths) {
-    const content = await readFile(resolve(path), 'utf8');
-    assert.match(content, /SQL Apps is a standalone project with its own runtime and workflow/, path);
-    assert.match(content, /Use only SQL Apps skills and project-owned commands for SQL Apps work/, path);
-    assert.match(content, /Do not disable or modify other installed plugins/, path);
-    assert.match(content, /Do not infer a directory from another plugin, session title or conversation history/, path);
-  }
+test('SQL Apps entry guidance keeps project selection in the coordinator', async () => {
+  const start = await readFile(resolve('content/start.md'), 'utf8');
+  assert.match(start, /Confirm the application directory before editing/);
+  assert.match(start, /Do not modify other plugins/);
+  assert.match(start, /Stop gathering context once the plan names an action or blocker/);
 });
 
 async function fixture(t) {
@@ -64,6 +55,31 @@ test('guide works before build and stays read-only without selecting an example 
   assert.deepEqual(report.stages.map(stage => stage.id), ['describe', 'run-locally', 'make-it-yours', 'share-optionally']);
 });
 
+test('guide routes run-locally through setup plan and suggests the profile that matches the agreed capabilities', async t => {
+  const home = await fixture(t);
+  assert.equal((await readGuide(home)).suggestedProfile, null, 'no profile is suggested before scope is agreed');
+  await saveBrief(home, brief());
+  let report = await readGuide(home);
+  assert.equal(report.nextStage, 'run-locally');
+  assert.equal(report.profile, null);
+  assert.equal(report.suggestedProfile, 'role-based-data', 'a data-only brief must not be steered to the file/job foundation');
+  assert.match(report.nextAction, /setup plan --profile role-based-data/);
+  assert.doesNotMatch(report.nextAction, /setup-check/, 'the coordinator, not the raw readiness check, orders approvals');
+  assert.match(report.cost.reviewCommand, /role-based-cost/);
+  await saveBrief(home, { ...brief(), capabilities: ['data', 'files', 'background-jobs'] });
+  report = await readGuide(home);
+  assert.equal(report.suggestedProfile, 'foundation');
+  assert.match(report.nextAction, /setup plan --profile foundation/);
+  assert.match(report.cost.reviewCommand, /demo-cost/);
+  await writeFile(join(home, 'role-based-data.json'), '{}');
+  report = await readGuide(home);
+  assert.equal(report.profile, 'role-based-data');
+  assert.equal(report.suggestedProfile, 'role-based-data', 'a configured profile wins over the brief');
+  assert.match(report.nextAction, /setup plan --profile role-based-data/);
+  assert.match(report.cost.reviewCommand, /role-based-cost .*azure-role-based-cost\.example\.json/);
+  assert.doesNotMatch(report.cost.reviewCommand, /demo-cost/);
+});
+
 test('guide persists decisions and reports evidence as historical, never current acceptance', async t => {
   const home = await fixture(t);
   const input = brief();
@@ -91,7 +107,19 @@ test('source changes invalidate reported progress and require local re-verificat
   assert.equal(report.progress.status, 'source-changed');
   assert.equal(report.nextStage, 'run-locally');
   assert.match(report.nextAction, /rebuild.*verify/i);
+  assert.match(report.nextAction, /setup plan --profile role-based-data/, 'a stale checkpoint still routes through the guarded coordinator');
   assert.equal(report.brief.nextChange, input.nextChange);
+});
+
+test('implementing the app after a checkpoint-free brief keeps the setup-plan route without inventing a checkpoint', async t => {
+  const home = await fixture(t);
+  await saveBrief(home, brief());
+  await writeFile(join(home, 'src/local-cli.ts'), 'implemented screens');
+  const report = await readGuide(home);
+  assert.equal(report.progress.status, 'source-changed');
+  assert.equal(report.nextStage, 'run-locally');
+  assert.doesNotMatch(report.nextAction, /checkpoint/, 'no checkpoint was ever saved');
+  assert.match(report.nextAction, /setup plan --profile role-based-data/);
 });
 
 test('guide records checkout-specific workspace selection without authorizing startup', async t => {
@@ -205,38 +233,91 @@ test('actual guide and plugin CLIs save/resume before build and reject invalid r
   assert.equal(await readFile(join(home, '.sql-apps', 'guide.json'), 'utf8'), saved);
 });
 
-test('all beginner entry points use the same local-first journey and retain sharing boundaries', async () => {
+test('build guide chooses the capability profile before asking the assistant to implement', async () => {
+  const content = await readFile('docs/guides/build-your-app.md', 'utf8');
+  const step = content.slice(content.indexOf('## 2.'), content.indexOf('## 3.'));
+  const profile = step.indexOf('suggestedProfile');
+  const prompt = step.indexOf('> Implement');
+  assert.ok(profile >= 0 && prompt > profile, 'the guide-suggested profile is decided before implementation starts');
+  assert.doesNotMatch(step, /using this foundation/, 'a data-only app must not be steered into the file/job foundation');
+});
+
+test('coordinator entry points use the local-first journey and retain sharing boundaries', async () => {
   for (const file of ['content/start.md', 'skills/sql-apps-getting-started/SKILL.md',
-    'docs/guides/build-your-app.md',
-    'plugins/sql-apps/skills/sql-apps-local/SKILL.md', 'plugins/sql-apps/skills/sql-apps-application/SKILL.md']) {
+    'docs/guides/build-your-app.md']) {
     const content = await readFile(file, 'utf8');
     assert.match(content, /Describe -> Run locally -> Make it yours -> Share optionally/, file);
     assert.match(content, /guide/, file);
-    assert.match(content, /historical/i, file);
   }
   const readme = await readFile('README.md', 'utf8');
   assert.match(readme, /Describe -> Run locally -> Make it yours -> Share optionally/);
   assert.match(readme, /docs\/guides\/build-your-app\.md/);
-  assert.match(readme, /minimal public-demo workflow is incomplete/);
-  assert.match(readme, /private-network SQL deployment is paid and still needs live acceptance/);
+  assert.doesNotMatch(readme, /Static Web Apps.*candidate/is,
+    'the beginner entry point should defer hosting topology to the sharing guide');
+  assert.match(readme, /docs\/guides\/sharing\.md/);
+  const sharing = await readFile('docs/guides/sharing.md', 'utf8');
+  const demoDeployment = await readFile('docs/reference/demo-deployment.md', 'utf8');
+  assert.match(sharing, /Static Web Apps.*website.*Container App.*API.*Data API Builder/is);
+  assert.match(sharing, /one public URL/is);
+  assert.match(sharing, /Standard.*not automatically cheaper/is);
+  assert.match(demoDeployment, /demo-publish.*--approve/is);
+  assert.match(demoDeployment, /hosting-compare/is);
+  assert.match(demoDeployment, /direct.*backend.*denied/is);
   const guideReference = await readFile('docs/reference/guide.md', 'utf8');
   assert.match(guideReference, /historical/i);
   assert.match(guideReference, /does not authorize.*cloud deployment/);
   assert.equal((await readFile('content/start.md', 'utf8')).includes('"'), false);
   const cloud = await readFile('plugins/sql-apps/skills/sql-apps-cloud-preview/SKILL.md', 'utf8');
-  assert.match(cloud, /optional final stage/);
-  assert.match(cloud, /synthetic-only/);
-  assert.match(cloud, /do not invent an estimate/);
-  assert.match(cloud, /still in development/);
-  assert.match(cloud, /blocked.*fixed|fixed charges/i);
-  assert.match(cloud, /never.*retry as paid/i);
-  assert.match(cloud, /Budgets.*not hard spending caps/);
-  assert.match(cloud, /not a user-count threshold/);
+  assert.match(cloud, /Sharing is optional/);
+  assert.match(cloud, /Load only the material needed for the request/);
 });
 
-test('reader documentation links and icons resolve after audience-based reorganization', async () => {
-  const files = ['README.md', 'CONTRIBUTING.md', 'SUPPORT.md', 'SECURITY.md', 'examples/todo/README.md',
-    ...(await readdir('docs', { recursive: true })).filter(file => file.endsWith('.md')).map(file => join('docs', file))];
+test('agent guidance stays lean, scoped and progressively disclosed', async () => {
+  const start = await readFile('content/start.md', 'utf8');
+  assert.ok(start.length <= 2500, `start prompt is ${start.length} characters; expected at most 2500`);
+
+  const runtimeSkills = ['application', 'local', 'diagnostics', 'validation', 'cloud-preview'];
+  for (const name of runtimeSkills) {
+    const path = `plugins/sql-apps/skills/sql-apps-${name}/SKILL.md`;
+    const content = await readFile(path, 'utf8');
+    assert.ok(content.length <= 7000, `${path} is ${content.length} characters; expected at most 7000`);
+  }
+
+  const entryPoints = [
+    'content/start.md',
+    'skills/sql-apps-getting-started/SKILL.md',
+    ...runtimeSkills.map(name => `plugins/sql-apps/skills/sql-apps-${name}/SKILL.md`),
+    'plugins/sql-apps/skills/sql-apps-design/SKILL.md',
+  ];
+  const contents = await Promise.all(entryPoints.map(path => readFile(path, 'utf8')));
+  const copiedBoundary = 'SQL Apps is a standalone project with its own runtime and workflow.';
+  assert.ok(contents.filter(content => content.includes(copiedBoundary)).length <= 1,
+    'keep the full project boundary in one coordinator instead of copying it into every skill');
+
+  const local = await readFile('plugins/sql-apps/skills/sql-apps-local/SKILL.md', 'utf8');
+  assert.doesNotMatch(local, /docs\/reference\/deployment\.md|demo-cost|role-based-cost/,
+    'local startup guidance must leave deployment and cloud cost work to cloud-preview');
+
+  await access('docs/maintainers/agent-evaluations.md');
+});
+
+test('hosting decision records the candidate architecture and promotion gate', async () => {
+  const hostingDecision = await readFile('docs/maintainers/hosting-decision.md', 'utf8');
+  assert.match(hostingDecision, /Database Connections.*retired.*November 30, 2025/is);
+  assert.match(hostingDecision, /Static Web Apps Standard.*linked.*Container App/is);
+  assert.match(hostingDecision, /Node API.*DAB.*sidecar/is);
+  assert.match(hostingDecision, /not.*assumed.*cheaper/is);
+  assert.match(hostingDecision, /role-based-data.*full-foundation.*unchanged/is);
+  assert.doesNotMatch(hostingDecision,
+    /Lovable|Bolt|Replit|v0\/Vercel|competitor|market (?:research|opportunity)/i);
+});
+
+test('reader documentation, skill references and icons resolve after audience-based reorganization', async () => {
+  const files = ['README.md', 'CONTRIBUTING.md', 'SUPPORT.md', 'SECURITY.md',
+    'skills/sql-apps-getting-started/SKILL.md',
+    ...(await readdir('docs', { recursive: true })).filter(file => file.endsWith('.md')).map(file => join('docs', file)),
+    ...(await readdir(join('plugins', 'sql-apps', 'skills'), { recursive: true }))
+      .filter(file => file.endsWith('.md')).map(file => join('plugins', 'sql-apps', 'skills', file))];
   for (const file of files) {
     const content = await readFile(file, 'utf8');
     assert.doesNotMatch(content, /docs\/azure\/|pre-launch-naming-transition/, file);

@@ -6,11 +6,11 @@ The reusable foundation contains authentication, ownership security, storage/job
 
 ## Default boundary
 
-`application.json` names the application and declares `selectedExamples: []`. The default runtime client, browser, DAB and SQL project are sample-free. The Todo reference lives in `examples/todo` with its own client, entity fragment, schema project and acceptance implementation. Its regression tests run in the foundation suite; it is not an application dependency.
+`application.json` names the application and declares `selectedExamples: []`. The default runtime client, browser, DAB and SQL project are sample-free. Optional examples own their client, schema, acceptance and workflow tests under `examples/<name>/tests`; they are not application dependencies.
 
 `tsconfig.runtime.json` compiles only runtime sources, excluding tests/examples. Container builds do not compile example tests and copy only intended runtime output. The local Functions image no longer copies the entire `dist` tree. The domain-neutral `dbo.OwnerPredicate` is independently defined under `sql/security`; file-job RLS has no dependency on a Todo table/function.
 
-New applications must not copy `examples/` or add Todo-only features unless explicitly requested. The installed `sql-apps-application` skill guides application-specific development and requires the checks below. This is a validated workflow, not a general schema/application generator.
+New applications must not copy `examples/` or its workflow tests unless explicitly requested. Inherited tests importing an excluded example are a broken application boundary, not a reason to restore the placeholder. Keep domain-neutral tests and negative regression checks proving legacy sample SQL/API absence. The installed `sql-apps-application` skill guides application-specific development and requires the checks below. This is a validated workflow, not a general schema/application generator.
 
 ## Required evidence
 
@@ -26,12 +26,29 @@ npm run app:check-api -- http://127.0.0.1:18080
 npm run local -- app-check <sql-container-name>
 ```
 
-- **Source and artifacts:** scans active `src`, `public`, `dab`, `sql`, compiled `dist/src`, `dist/functions`, browser bundle and supplied SQL model. The SQL project extracts the actual DACPAC model using MSBuild's built-in Unzip task. Recognizes explicit Todo types/methods/entities/UI IDs and example imports, not arbitrary developer TODO comments. Rejects broad Docker copies that ship examples/test output. Missing build output fails rather than proving absence.
-- **CI:** `npm test` runs the delivery check, plus negative tests inserting leftovers into each surface; CI repeats it after SQL build. Keep application-specific behavior/security tests too.
+- **Source and artifacts:** scans active `src`, `public`, `dab`, `sql`, compiled `dist/src`, `dist/functions`, browser bundle and supplied SQL model. It also parses root `tests` and `dist/tests` for example imports/re-exports and literal file dependencies, including absent example trees. Fixture strings, developer TODO comments and negative SQL/API checks remain valid. The SQL project extracts the DACPAC model using MSBuild's built-in Unzip task. Rejects broad Docker copies that ship examples/test output. Missing build output fails rather than proving absence.
+- **CI:** `npm test` runs the delivery check and all root tests, then compiled workflow tests for examples actually present. An absent examples tree is explicitly skipped; a present test with missing compiled output or a failing workflow fails the command. Keep application-specific behavior/security tests too. A targeted domain-test pass is not full-suite evidence. CI repeats delivery checking after SQL build.
 - **API:** creates a separate local acceptance session, verifies authenticated `/api/Todo` returns 404 and the GraphQL `todos` field produces an unknown-field/schema-validation error, then revokes its own session. A backend outage or authentication denial is not accepted as proof of absence.
 - **Database:** an admin-only read-only check detects sample table/security objects and requires the shared ownership predicate. It fails on legacy databases instead of dropping objects. Fresh databases published from the default project have no sample table.
 
 No one check proves all layers. These checks target the known reference example, not every possible generated placeholder. Add explicit signatures/acceptance for future examples rather than broad keyword bans or silently excluding failures.
+
+Test dependency inspection includes imports/re-exports, literal filesystem calls
+and simple paths stored in variables or arrays. Fixture-source strings and
+paths under dynamically created temporary checkouts are not example dependencies.
+Arbitrary computed paths cannot all be proved statically; full-suite execution
+remains required.
+
+## Domain contracts and live acceptance
+
+Apply these rules to an application's own fields and procedures, not just the reference example:
+
+- **Text storage:** SQL `nvarchar(n)` limits UTF-16 code units, matching JavaScript string `.length` and HTML `maxlength`, not necessarily a validator's string `.max(n)`. Test ASCII and supplementary Unicode at the exact maximum and maximum + 1 for create, update and returned records. Normalize inputs only as agreed; do not silently trim returned SQL values. Use wide procedure inputs (`nvarchar(max)`) so narrowing cannot truncate invalid input before validation; reject blank values and enforce `DATALENGTH(value) <= 2 * n` after the agreed normalization.
+- **Exact values:** validate enum membership and byte length together because SQL comparisons can ignore trailing padding. Use the agreed case-sensitive/binary comparison where exact tokens are required; an unknown token must never pass through a zero-length fallback. Validate real Gregorian dates, including leap days, rather than only their textual shape. Reject caller fields for server-owned identities, ownership and status unless the app explicitly permits them.
+- **Readiness:** probe the actual domain schema and required procedure access read-only. Avoid concatenating catalog/domain strings with differing collation; use independent or numeric checks. A responding readiness procedure is necessary, but does not prove CRUD, persistence or authorization.
+- **Mutation results:** capture `OUTPUT ... INTO` a typed table variable rather than streaming a result to DAB before affected-row validation. Complete all `THROW` checks and the transaction before the final `SELECT`. Require the API to validate the successful row shape and requested identity for updates/deletes; an empty or mismatched result is not success.
+- **Actual errors:** an early empty SQL result was observed as HTTP201 before a later error with the pinned DAB version. Raw SQL rejection can surface as HTTP500 `DatabaseOperationFailed`, not a promised HTTP404/422. Assert actual non-success and unchanged data for missing/foreign mutations; do not hide errors or weaken the contract to accept an empty success.
+- **Live controls:** pair negative HTTP/SQL probes with a valid positive control using the same intended route, origin and authorization boundary. Otherwise a missing Origin or denied role can masquerade as successful input/owner validation. Verify the agreed browser action, independent SQL state and a genuinely new browser document after reload. Follow the validation skill for fixture ownership/cleanup and truthful loading/save/refresh errors.
 
 ## Existing data is preserved
 

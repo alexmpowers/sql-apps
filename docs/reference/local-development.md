@@ -12,6 +12,8 @@ The foundation `app` command starts SQL/DAB/storage/Functions/browser; saved bri
 
 Follow [scoped consent and readiness](../guides/run-locally.md#approvals-and-readiness). A proposed origin or successful build is not a running app. Publish the intended origin only after response/readiness probes, then report workflow acceptance separately.
 
+Local mutations now enforce [remembered permissions](local-consent.md) before dispatch, including when invoked directly. Obtain them with the single `setup approval` bundle (or individual grants from the pre-build operation plan) before the commands below. Read-only checks remain ungated; restore/build grants and existing workspace selection are reused across sessions.
+
 ## Prerequisites
 
 First time installing development tools? Use [guided setup](../guides/getting-started.md) rather than treating this list as instructions. Copilot can offer approved installations, explain access/license conditions, guide restarts and verify each step on Windows, macOS or Linux. `node scripts/setup-check.mjs` runs before npm restore/build and never installs or mutates resources.
@@ -23,7 +25,7 @@ First time installing development tools? Use [guided setup](../guides/getting-st
 - A free selected workspace port block. Explicit legacy compatibility uses 15000 (DAB), 18080 (gateway), 10000/10001 (Blob/Queue), and 17071 (Functions).
 - Initial access to download the pinned public Azurite/Functions/Node images, npm packages, .NET SQL build dependencies and SqlPackage. Functions Core Tools need not be installed: the project runs the real host in its pinned container image.
 
-No Azure CLI login, subscription, Entra registration, or billable resources are required for these commands. First use needs package/image downloads; cached dependencies and images can be used afterward.
+No Azure CLI login, subscription, Entra registration, or billable resources are required for default local preview. The explicit [real Entra sign-in opt-in](authentication.md#real-entra-sign-in-locally) requires a development registration, not an Azure deployment. First use needs package/image downloads; cached dependencies and images can be used afterward.
 
 ## Start from this checkout
 
@@ -43,7 +45,7 @@ For an existing legacy stack, approve `npm run local -- workspace-init legacy` i
 
 Isolated mode also derives a database and least-privilege SQL login from the workspace ID. Explicitly reusing the same external SQL container from two workspaces therefore does not implicitly share their application database/login. Existing legacy databases are not renamed or copied.
 
-The main `app` command requires this explicit selection. Advanced individual legacy commands remain available for existing workflows; agents must still obtain informed approval and confirm ownership. An external SQL container can be explicitly selected for `verify`/`init`; an isolated workspace will not stop or take ownership of it.
+Local mutating commands require this explicit selection. For existing fixed-port workflows, select `workspace-init legacy` and record the applicable consent grants; agents must still confirm ownership. An external SQL container can be explicitly selected for `verify`/`init`; an isolated workspace will not stop or take ownership of it.
 
 After selection and startup approval:
 
@@ -51,9 +53,9 @@ After selection and startup approval:
 npm run local -- app
 ```
 
-After the intended server responds and `/health/ready` passes, open the URL printed by startup (**http://127.0.0.1:18080** in legacy mode). For approved foundation file/job scope, choose Development Alice or Development Bob and use file upload/list/download/delete, Function invocation and queued file processing. Switching users revokes the previous local session; each user sees only their own data, files and jobs. Reloading preserves the selected session within the browser tab; SQL rows and Blob files persist independently of browser sessions.
+After the intended server responds and `/health/ready` passes, open the URL printed by startup (**http://127.0.0.1:18080** in legacy mode) and select **Open local preview**. For approved foundation file/job scope, use file upload/list/download/delete, Function invocation and queued file processing. For separate two-user ownership checks, open the reported developer page in the same tab, switch test identities and return to the application. Switching revokes the previous session; each user sees only their own data, files and jobs. Reloading preserves the session within the browser tab; SQL rows and Blob files persist independently of browser sessions.
 
-`app` starts/reuses the project-owned SQL container, publishes the schema, runs SQL security checks, recreates local DAB, starts persistent Azurite, builds/starts the local Functions image, and serves the existing frontend and gateway on a single loopback origin. It stays in the foreground. Ctrl+C stops the browser gateway; the service containers continue running. After restarting the browser server, select a user again because local sessions are held only in server memory.
+`app` starts/reuses the project-owned SQL container, publishes the schema, runs SQL security checks, recreates local DAB, starts persistent Azurite, builds/starts the local Functions image, and serves the existing frontend and gateway on a single loopback origin. It stays in the foreground. Ctrl+C stops the browser gateway; the service containers continue running. In preview mode, open local preview again after restarting the browser server because its sessions are held only in server memory.
 
 For individual SQL/data steps and API acceptance:
 
@@ -67,6 +69,16 @@ npm run local -- api-test
 ```
 
 Use `npm run local -- services` after the individual SQL/data steps, then `npm run local -- serve` to start only the browser gateway against running services. Pass the same optional SQL container name to every command when using a non-default container. `npm run local -- serve-sql` starts the optional SQL-only browser with unavailable file/function/processing controls, without requiring service credentials.
+
+### Initial readiness and later outages
+
+Every local gateway checks its included dependencies before listening. Foundation readiness requires an authorized, bounded `FileJob` read through DAB, properties of the required Blob containers and queues, and a correctly authenticated Functions echo with the expected result. These probes do not create containers, queues or business records. DAB's anonymous aggregate `/health` result is not the SQL verdict: its anonymous REST check can be Forbidden while the authorized application query succeeds.
+
+`serve` reuses existing services and credentials; it never starts or recreates dependencies. It makes at most three read-only readiness attempts, with a four-second shared deadline per attempt and one-second pauses between failures. SQL-only readiness checks only SQL/DAB; the role-based profile checks its configured authorized procedure without foundation services. After listening, a separate actual HTTP readiness confirmation has a five-second caller timeout. Initial failure closes the new gateway, names the failed dependency and publishes no ready URL. These checks are not service-repair loops or retries of failed image builds.
+
+An already-running gateway stays reachable during a later outage: `/health/live` remains HTTP 200 and `/health/ready` returns HTTP 503 with `status: not-ready` and a safe `data`, `blob`, `queue` or `functions` dependency identifier. Worker failure alone does not disable durable job submission or erase queued work when SQL and storage remain available. Configured browser capabilities are not instantaneous health guarantees; operation failures remain explicit. The next successful readiness probe recovers in place without a gateway restart.
+
+Read the named failure and inspect the affected dependency before separately approved recovery. Do not use full `app` or `services` startup as a read-only diagnostic: those commands can recreate owned DAB/storage/Functions resources. Setup also blocks a matching but unready gateway rather than replacing it or claiming a successful launch.
 
 With the browser server running, use a second terminal:
 
@@ -102,13 +114,17 @@ See [the reference guide](../../examples/todo/README.md). Local acceptance is no
 
 Upload a safe ASCII single-segment name (letters/digits, underscore, hyphen and dot, up to 128 characters; no `..`). Maximum upload size is 4 MiB. Uploading the same name replaces only the selected user's file. Download and delete use the authenticated gateway, never a browser storage key or SAS.
 
+The file list loads at most 100 entries at a time. Select **Load more files** to request the next owner-scoped page. Job polling returns all active jobs plus the 100 newest completed or failed jobs; maintenance separately scans full history when retention is enabled.
+
 Click **Process file**. Job progress updates automatically by default; **Refresh jobs** is also available. The gateway reads the selected user's file, saves an immutable private snapshot, creates an owner-defaulted SQL job and sends a base64-encoded Azure Storage Queue message. The real Functions queue trigger updates `queued` -> `processing` -> `completed`, computing SHA-256, byte count and UTF-8 text-line count. Empty content has zero lines; CRLF/CR/LF separators are supported, and a trailing separator counts a final empty line. Binary content is decoded with UTF-8 replacement characters for the text-line metric.
+
+Completed job details, including the full SHA-256, wrap on narrow screens without clipping or truncating the result.
 
 The source file can be replaced or deleted after submission without changing the snapshot. Duplicate delivery skips terminal jobs. Queue submission failures persist a failed job and return an explicit error. Processing retries up to five deliveries; exhausted messages enter `file-jobs-poison`, whose handler persists failure and logs the job ID. Inspect worker logs for failures; if the data service is unavailable even through poison-handler retries, recover services and inspect/replay the remaining poison messages rather than assuming successful processing.
 
 Delete terminal jobs to remove their SQL record and snapshot. Queued/running jobs cannot be deleted (409). A **Retry snapshot** button on failed jobs creates a new job and copies the original private snapshot, even if the source file was deleted or replaced. The old job remains failed, and the new `parent_job_id` links history. Only the owner can retry; missing snapshots return 409 with guidance to upload again. Each explicit retry is a new submission, not automatic business-level deduplication.
 
-Workers hold an exclusive Blob lease from the authoritative job check through processing and release it on completion or failure. Job deletion and retention must acquire that same lease before removing the SQL record, then delete the snapshot using the lease ID. A live worker therefore prevents deletion even if timeout recovery has marked its job failed. Lease conflicts are reported, not silently skipped.
+Workers hold an exclusive Blob lease from the authoritative job check through processing and release it on completion or failure. Timeout recovery, job deletion and retention must acquire that same lease before changing the SQL record. Recovery skips a stale job while a live worker holds the lease; deletion and retention report the conflict.
 
 If SQL deletion fails, the snapshot is preserved. If snapshot cleanup fails after the record is removed, the error is reported; repeating the owner-scoped job DELETE request cleans up the leftover snapshot. That repeat may return 404 because the record is already gone. Opt-in retention uses the same ordering and remains disabled by default.
 
@@ -155,9 +171,13 @@ The browser only sees traces in its verified owner's namespace. No bearer tokens
 
 ### Development identity boundary
 
-The browser never supplies object IDs to the data proxy. A same-origin `/local/session` request selects one of two fixed development users and receives an unpredictable opaque bearer token. The local gateway validates that token, strips incoming identity/role headers, and creates the DAB principal server-side. Sessions expire after eight hours and are revoked on switch/sign-out.
+The product uses **Open local preview** and **End preview**, not persona selectors. The server chooses the default fixed simulated identity and issues an unpredictable 43-character opaque bearer token. Authorization and ownership testing uses the separate local-only developer page, `/__dev/identity`, in the same tab. Its fixed Development Alice/Bob test identities carry explicit role labels; switching invalidates the previous session. Sessions expire after eight hours, are limited to 1,000 active sessions and are revoked on switch or **End preview**.
 
-The local server binds only to `127.0.0.1`, requires the exact development Host, and requires the same Origin on mutations, including session creation. It refuses `NODE_ENV=production`. These routes and session handling are absent from the production entry point; production still requires Entra access tokens. Development users are not real authenticated people, and local sessions are not a security boundary against other processes on your machine.
+The browser never supplies object IDs to the data proxy. The gateway validates the issued preview session or, in explicit local Entra mode, a real delegated access token, strips incoming identity/role headers and creates the trusted local DAB principal server-side. Local DAB remains claim simulation even with real local Entra sign-in; that does not prove cloud DAB identity or Azure service permissions.
+
+The local server binds only to `127.0.0.1`, requires the exact development Host, and requires the same Origin on mutations, including session creation. It refuses `NODE_ENV=production`. The developer page/script, `/local/users` and `/local/session` exist only in preview mode, not local Entra mode or production. Production requires verified Entra access tokens. Preview users are not real authenticated people, and local sessions are not a security boundary against other processes on your machine. Never expose the local stack remotely.
+
+See [Authentication and application access](authentication.md) for `SQL_APPS_LOCAL_AUTH=entra`, the UUID tenant/client settings, the exact printed `/auth/redirect.html` callback and the separately approved development registration. Invalid Entra configuration or sign-in failure never falls back to simulation. Setup matches authentication mode, tenant and client in addition to ownership and source fingerprint; changing them requires stopping only the intended gateway and restarting with the reviewed configuration, not resetting data or replacing another process.
 
 Azurite and the local Functions entry point use separately generated, gitignored credentials. The browser never receives them. Local HTTP Functions require the gateway's server-only secret and validated user envelope. Production Functions still require the exact Entra gateway service principal and application role; that verifier is not weakened. Local startup refuses production mode.
 
@@ -218,7 +238,7 @@ Legacy mode supports only one DAB instance on port 15000. Separate isolated chec
 
 ## Interactive REST and GraphQL
 
-Local DAB uses documented [EasyAuth claim simulation](https://learn.microsoft.com/en-us/azure/data-api-builder/concept/security/authenticate-easy-auth), not actual authentication. The local gateway requires its issued session; the production gateway requires verified Entra tokens. Both reject caller-supplied principal headers.
+Local DAB uses documented [EasyAuth claim simulation](https://learn.microsoft.com/en-us/azure/data-api-builder/concept/security/authenticate-easy-auth), not actual Entra authentication. The local gateway validates an issued opaque session in default preview mode or a verified delegated token in opt-in Entra mode; the production gateway requires verified Entra tokens. Both reject caller-supplied principal headers. Real browser sign-in locally does not replace the local DAB simulation or establish cloud backend permissions; see the [authentication boundaries](authentication.md#three-distinct-boundaries).
 
 Example reading owner-filtered file jobs from DAB directly with the local-only helper (after creating a job through the browser):
 
@@ -261,8 +281,25 @@ Ownership labels prevent accidental replacement/removal of unrelated containers.
 
 ## What is and is not verified
 
+Functions packaging has a clean-room regression that stages the actual Docker recipes, invokes the real compiler and checks shipped relative-module dependencies:
+
+```powershell
+npm run build
+node node_modules\typescript\lib\tsc.js
+node --test dist\tests\functions-packaging.test.js
+```
+
+It needs installed dependencies but no running SQL or Docker services. After approval for image downloads/cache writes, validate both actual Functions images separately:
+
+```powershell
+docker build --file functions\local.Dockerfile --tag sql-apps-functions:local-check .
+docker build --file functions\Dockerfile --tag sql-apps-functions:production-check .
+```
+
+The compiler stages need the workspace-check script and declaration. The local runtime also needs the shared `.mjs` helpers and runtime workspace-check script; host compilation alone does not prove those image inputs are complete. Successful image builds do not prove Functions host execution or a completed browser-submitted job. These commands neither start services nor deploy or push an image.
+
 This is a usable **frontend/gateway/SQL/DAB/Blob/Queue/Functions learning workflow**, not a complete emulation of Azure. Real two-user Blob access, real Functions HTTP/queue triggers, SQL job ownership, retry/failure behavior and persisted results are tested locally. Offline worker startup is tested on a network with no public egress; the pinned Functions base contains its extension bundle. Azurite telemetry is disabled. First-time package/image/tool downloads still need internet, as do changed dependencies that are not already cached.
 
-Browser Entra login, managed identity, private endpoints, cloud Blob/Functions, Key Vault and cloud recovery still require Azure acceptance. Local SQL login/EasyAuth/storage secrets are intentionally separate from cloud Entra/managed-identity configuration. Azurite is not Azure Files or ADLS Gen2; its Table service is not part of this workflow. The SQL preview is not a production database or backup service; see the [current known limitations](https://microsoft.github.io/azure-sql-database-container/known-limitations.html).
+Browser Entra sign-in can be tested through the explicit local opt-in, but cloud sign-in, managed identity, private endpoints, cloud Blob/Functions, Key Vault and cloud recovery still require Azure acceptance. Local SQL login/EasyAuth/storage secrets are intentionally separate from cloud Entra/managed-identity configuration. Azurite is not Azure Files or ADLS Gen2; its Table service is not part of this workflow. The SQL preview is not a production database or backup service; see the [current known limitations](https://microsoft.github.io/azure-sql-database-container/known-limitations.html).
 
 No Azure free allowance is needed to start locally. The existing cloud template includes billed EP1/S0/private-endpoint resources and is **not** a free-tier template. A separate optional learning cloud deployment profile remains future work; do not deploy the current template expecting a zero bill.

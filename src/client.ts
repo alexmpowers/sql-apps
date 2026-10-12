@@ -8,6 +8,11 @@ export interface ClientOptions {
   fetch?: typeof fetch;
 }
 
+export interface ClientFilePage {
+  files: { name: string; size: number }[];
+  continuationToken?: string;
+}
+
 export class ApiError extends Error {
   constructor(public readonly status: number) {
     super(`Application request failed (${status})`);
@@ -49,9 +54,17 @@ export class SqlAppsClient {
   async deleteFile(name: string): Promise<void> {
     await this.request(`/storage/${encodeURIComponent(name)}`, { method: 'DELETE' });
   }
-  async listFiles(): Promise<{ name: string; size: number }[]> {
-    return z.object({ files: z.array(z.object({ name: z.string(), size: z.number().nonnegative() })) })
-      .parse(await (await this.request('/storage')).json()).files;
+  async listFiles(continuationToken?: string): Promise<ClientFilePage> {
+    const path = continuationToken === undefined ? '/storage' :
+      `/storage?${new URLSearchParams({ continuationToken })}`;
+    const page = z.object({
+      files: z.array(z.object({ name: z.string(), size: z.number().nonnegative() })),
+      continuationToken: z.string().min(1).max(2048).optional(),
+    }).parse(await (await this.request(path)).json());
+    return {
+      files: page.files,
+      ...(page.continuationToken ? { continuationToken: page.continuationToken } : {}),
+    };
   }
   async listJobs(signal?: AbortSignal): Promise<FileJob[]> {
     return z.object({ jobs: z.array(fileJobSchema) }).parse(await (await this.request('/jobs', signal ? { signal } : {})).json()).jobs;

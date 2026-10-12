@@ -16,7 +16,8 @@ const probe = async (code: string, env: NodeJS.ProcessEnv = {}) =>
   run(process.execPath, ['--input-type=module', '-e', `import { resolveHome, status, main } from ${JSON.stringify(moduleUrl)}; ${code}`], { env });
 
 test('local plugin bundle validates its manifests, matching skill names and isolated sources', async () => {
-  assert.match(await run(process.execPath, [resolve('scripts', 'check-plugin.mjs')]), /six skills/);
+  assert.match(await run(process.execPath, [resolve('scripts', 'check-plugin.mjs')]), /six skills, four design references, MIT license/);
+  assert.equal(await readFile(resolve('plugins', 'sql-apps', 'LICENSE'), 'utf8'), await readFile('LICENSE', 'utf8'));
 });
 
 test('SQL Apps identity is consistent across packages, platform manifests and marketplaces', async () => {
@@ -29,7 +30,7 @@ test('SQL Apps identity is consistent across packages, platform manifests and ma
     assert.equal(manifest.name, 'sql-apps', path);
     assert.equal(manifest.homepage, repository, path);
     assert.equal(manifest.repository, repository, path);
-    assert.equal(manifest.version, '0.1.0', path);
+    assert.equal(manifest.version, '0.1.1', path);
     assert.deepEqual(manifest.author, { name: 'Microsoft SQL team (mssql)', url: 'https://github.com/microsoft' }, path);
     if (manifest.interface) {
       assert.equal(manifest.interface.displayName, 'SQL Apps');
@@ -70,7 +71,6 @@ test('SQL Apps UI, wordmark and private-state exclusions use the new brand', asy
   const html = await readFile('public/index.html', 'utf8');
   assert.match(html, /<title>SQL Apps<\/title>/);
   assert.match(html, /<h1>SQL Apps<\/h1>/);
-  assert.match(await readFile('examples/todo/web/index.html', 'utf8'), /<title>SQL Apps - synthetic Todo demo<\/title>/);
   assert.match(await readFile('content/icons/sql-apps-wordmark.svg', 'utf8'), /<title id="title">SQL Apps<\/title>/);
   for (const path of ['.gitignore', '.dockerignore']) {
     const lines = (await readFile(path, 'utf8')).split(/\r?\n/);
@@ -80,72 +80,122 @@ test('SQL Apps UI, wordmark and private-state exclusions use the new brand', asy
   }
 });
 
-test('beginner skills preserve per-action consent, pre-build guidance and safe resume boundaries', async () => {
-  const local = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-local', 'SKILL.md'), 'utf8');
-  for (const requirement of [
-    /getting-started\.md/, /Windows, macOS and Linux/, /If Node is missing/,
-    /Before EACH tool installation, ask explicit approval/, /human-only/, /version managers/,
-    /private preview/, /credentials are entered in their own terminal/, /ACCEPT_EULA=Y/,
-    /ask separately before `npm ci`\/build/i, /setup-check/, /never.*reset volumes/i,
-    /HTTP liveness alone is not end-to-end acceptance/, /Ctrl\+C/,
-  ]) assert.match(local, requirement);
-  const diagnostic = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-diagnostics', 'SKILL.md'), 'utf8');
-  assert.match(diagnostic, /setup-check.*before restore\/build/);
-  assert.match(diagnostic, /Ask before every installation\/download/);
+test('product guidance keeps persona selectors out of application screens', async () => {
+  const html = await readFile(resolve('public', 'index.html'), 'utf8');
+  assert.doesNotMatch(html, /Alice|Bob|development-user|select-user/i);
+  const application = await readFile(resolve('src', 'web', 'app.ts'), 'utf8');
+  assert.doesNotMatch(application, /development-user|select-user|choose a development user/i);
 });
 
-test('local guidance handles unavailable approval controls and observable launch gates', async () => {
-  const local = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-local', 'SKILL.md'), 'utf8');
+test('product guidance documents authentication boundaries and hosting accurately', async () => {
+  const authentication = await readFile(resolve('docs', 'reference', 'authentication.md'), 'utf8');
   for (const requirement of [
-    /first.*user unavailable/i, /no approval was captured/i, /ordinary chat/i,
-    /before the first approval prompt/i, /approved operations/i,
-    /Startup passes `ACCEPT_EULA=Y`; there is no chat dialog/,
-    /implemented.*built.*running.*workflow verified/is,
-    /Publish.*URL only after.*responds/i, /proposed.*unavailable/i,
-    /blocked, not complete/i, /user-reported/i,
-  ]) assert.match(local, requirement);
+    /SQL_APPS_LOCAL_AUTH/, /\/auth\/redirect\.html/,
+    /App Service.*preferred future/i, /Container Apps.*current/i,
+    /SWA CLI.*mock/i, /does not prove cloud DAB identity/i,
+    /Build -> Sign in -> Give access -> Publish/,
+  ]) assert.match(authentication, requirement);
 });
 
-test('application guidance preserves data-only scope, custom-role authorization and actual checkpoints', async () => {
-  const application = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-application', 'SKILL.md'), 'utf8');
-  for (const requirement of [
-    /data-only/i, /serve-sql/, /role-based-app/, /role-based-serve/, /role-based-data/,
-    /role definition/i, /application role assignment/i, /token claims/i,
-    /gateway-selected DAB role/i, /procedure permissions/i, /custom-role forwarding/i,
-    /Function\.Invoke/, /actual stage/i, /completed.*nextChange/i,
-    /loaded skill source/i, /application checkout/i, /installed launcher/i,
-  ]) assert.match(application, requirement);
+test('completed job output wraps long hashes in the shared browser UI', async () => {
+  const css = await readFile(resolve('public', 'style.css'), 'utf8');
+  assert.match(css, /#jobs\s+li\s*\{[^}]*overflow-wrap:\s*anywhere\s*;?[^}]*\}/);
 });
 
-test('cloud guidance selects the app profile and keeps discovery from changing deployment subject', async () => {
-  const cloud = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-cloud-preview', 'SKILL.md'), 'utf8');
-  for (const requirement of [
-    /profile before.*cost command/i, /demo-only/i,
-    /role-based-cost/, /role-based-assign/, /role-based-smoke/,
-    /Existing-resource discovery must not change the deployment subject/,
-    /potential collisions/i, /reuse.*explicitly requested/i,
-    /loaded skill source/i, /application checkout/i, /installed launcher/i,
-    /tenant ID.*email address/i,
-  ]) assert.match(cloud, requirement);
+test('setup safety is enforced by executable coordinator paths', async () => {
+  const launcherSource = await readFile(launcher, 'utf8');
+  assert.doesNotMatch(launcherSource, /Run npm run build/, 'missing-build guidance must use the guarded consent-run build path');
+  assert.match(launcherSource, /consent-run build/);
+  const setup = await readFile(resolve('scripts', 'setup.mjs'), 'utf8');
+  assert.match(setup, /setup approve needs --approval/);
+  assert.match(setup, /Setup stopped at/);
+  assert.match(setup, /no automatic restart was performed/);
 });
 
-test('frontend design guidance requires deliberate, accessible visual review', async () => {
-  const frontendDesign = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-frontend-design', 'SKILL.md'), 'utf8');
-  assert.match(frontendDesign, /^---\r?\nname: sql-apps-frontend-design\r?\n/m);
+test('application boundary retains the proven SQL storage and mutation rules', async () => {
+  const boundary = await readFile('docs/maintainers/application-boundary.md', 'utf8');
   for (const requirement of [
-    /present\s+two or three app-appropriate visual directions/i,
-    /get approval of the direction before implementation/i,
-    /preserve existing app workflows and agreed capability boundaries/i,
-    /inspect\s+the actual rendered interface in a browser at desktop and narrow[- ]mobile viewports/i,
-    /keyboard.*focus|focus.*keyboard/is,
-    /reduced[- ]motion/i,
-    /if browser preview or a relevant state is unavailable or unsafe to reach,\s*state the limitation and report what you did inspect/i,
-  ]) assert.match(frontendDesign, requirement);
+    /UTF-16 code units/, /DATALENGTH/, /nvarchar\(max\)/i,
+    /enum membership.*byte length/is, /collation/i,
+    /OUTPUT.*INTO.*THROW.*SELECT/is,
+    /positive control/i, /HTTP201/, /DatabaseOperationFailed/,
+  ]) assert.match(boundary, requirement);
+});
 
-  const application = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-application', 'SKILL.md'), 'utf8');
-  assert.match(application, /for substantial new screens, visual redesigns, or UI-focused polish,\s*use `sql-apps-frontend-design` for app-specific visual direction and rendered-browser review/i);
+test('SQL Apps design guidance progressively discloses packaged references', async () => {
+  const craftFloor = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-design', 'references', 'craft-floor.md'), 'utf8');
+  const uiRecipes = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-design', 'references', 'ui-style-recipes.md'), 'utf8');
+  const visualRecipes = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-design', 'references', 'visual-style-recipes.md'), 'utf8');
+  const formatting = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-design', 'references', 'formatting.md'), 'utf8');
+  assert.ok(craftFloor.length > 1000);
+  assert.ok(uiRecipes.length > 1000);
+  assert.ok(visualRecipes.length > 1000);
+  assert.ok(formatting.length > 1000);
+  const design = await readFile(resolve('plugins', 'sql-apps', 'skills', 'sql-apps-design', 'SKILL.md'), 'utf8');
+  assert.match(design, /references\/craft-floor\.md/);
   const guide = await readFile(resolve('docs', 'guides', 'build-your-app.md'), 'utf8');
-  assert.match(guide, /for substantial new screens or a visual redesign,\s*ask your assistant to use the `sql-apps-frontend-design` skill for an app-appropriate visual direction and browser review of the rendered interface/i);
+  assert.match(guide, /`sql-apps-design` skill/);
+});
+
+test('agent guidance stays concise, stack-neutral and script-led', async () => {
+  const read = (path: string) => readFile(resolve(path), 'utf8');
+  const gettingStarted = await read('skills/sql-apps-getting-started/SKILL.md');
+  const application = await read('plugins/sql-apps/skills/sql-apps-application/SKILL.md');
+  const local = await read('plugins/sql-apps/skills/sql-apps-local/SKILL.md');
+  const cloud = await read('plugins/sql-apps/skills/sql-apps-cloud-preview/SKILL.md');
+  const validation = await read('plugins/sql-apps/skills/sql-apps-validation/SKILL.md');
+  const design = await read('plugins/sql-apps/skills/sql-apps-design/SKILL.md');
+  const craftFloor = await read('plugins/sql-apps/skills/sql-apps-design/references/craft-floor.md');
+  const uiRecipes = await read('plugins/sql-apps/skills/sql-apps-design/references/ui-style-recipes.md');
+  const visualRecipes = await read('plugins/sql-apps/skills/sql-apps-design/references/visual-style-recipes.md');
+  const formatting = await read('plugins/sql-apps/skills/sql-apps-design/references/formatting.md');
+  const buildGuide = await read('docs/guides/build-your-app.md');
+  const runGuide = await read('docs/guides/run-locally.md');
+  const guideReference = await read('docs/reference/guide.md');
+  const roleBasedReference = await read('docs/reference/role-based-data.md');
+  const evaluations = await read('docs/maintainers/agent-evaluations.md');
+  const readme = await read('README.md');
+
+  assert.match(buildGuide, /guide-save|guide\.mjs --save/, 'the build guide must show the mutating save command');
+  assert.match(application, /saved brief/i);
+  assert.match(application, /ask only.*missing/i);
+  assert.match(application, /requested.*useful slice/i);
+  assert.doesNotMatch(application, /Then implement the first useful change/);
+  assert.doesNotMatch(application, /npm run build[\s\S]*npm test/, 'the application skill must delegate command selection');
+  assert.doesNotMatch(local, /setup-check/, 'setup plan is the normal prerequisite probe');
+  assert.match(cloud, /For a cost review[\s\S]*docs\/guides\/costs\.md/);
+  assert.match(cloud, /For deployment[\s\S]*docs\/reference\/deployment\.md/);
+  assert.doesNotMatch(readme, /Static Web Apps candidate/);
+  assert.doesNotMatch(readme, /uses TypeScript, Azure SQL Database, Data API builder, Blob Storage and Azure Functions/);
+  await assert.rejects(read('docs/superpowers/plans/2026-10-10-bakery-ordering.md'));
+  await assert.rejects(read('docs/superpowers/specs/2026-10-10-bakery-ordering-design.md'));
+  assert.match(await read('docs/README.md'), /Temporary implementation plans.*not product guidance/is);
+
+  for (const [path, content] of [
+    ['ui-style-recipes.md', uiRecipes],
+    ['visual-style-recipes.md', visualRecipes],
+    ['formatting.md', formatting],
+  ] as const) {
+    assert.doesNotMatch(content, /src\/global\.css|@\/lib\/utils|Radix|Tailwind|VegaVisual|DataGrid|fabric-visuals/i, path);
+  }
+  assert.doesNotMatch(craftFloor, /always wrong/);
+  assert.doesNotMatch(formatting, /must be strictly followed/i);
+  assert.ok(uiRecipes.split(/\s+/).length < 700, 'UI guidance should fit its context budget');
+  assert.ok(visualRecipes.split(/\s+/).length < 600, 'visual guidance should fit its context budget');
+  assert.ok(formatting.split(/\s+/).length < 500, 'formatting guidance should fit its context budget');
+
+  const statusPhrase = /implemented.*built.*running.*workflow[- ]verified/gi;
+  const skillMentions = [gettingStarted, application, local, cloud, validation, design]
+    .reduce((count, content) => count + (content.match(statusPhrase)?.length ?? 0), 0);
+  assert.equal(skillMentions, 1, 'the validation skill owns structured status vocabulary');
+  for (const [path, content] of [
+    ['README.md', readme],
+    ['docs/guides/run-locally.md', runGuide],
+    ['docs/reference/guide.md', guideReference],
+    ['docs/reference/role-based-data.md', roleBasedReference],
+    ['docs/maintainers/agent-evaluations.md', evaluations],
+  ] as const) assert.doesNotMatch(content, statusPhrase, path);
+  assert.doesNotMatch(design, /Done \/ Working \/ Next \/ Blocked/);
 });
 
 test('plugin launcher binds the actual checkout independently of plugin cache/session directory', async t => {
@@ -237,6 +287,13 @@ test('plugin dispatch uses checkout cwd, passes literal arguments and preserves 
   const roleBasedSetup = JSON.parse(await run(process.execPath, [launcher, 'role-based-setup-check', 'custom-sql'], { env: { SQL_APPS_HOME: home } }));
   assert.deepEqual(roleBasedSetup.args, ['--json', '--profile', 'role-based-data', '--container', 'custom-sql']);
   await rm(join(home, 'dist'), { recursive: true });
+  await writeFile(join(home, 'scripts/setup.mjs'),
+    'console.log(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)}));');
+  const journey = JSON.parse(await run(process.execPath,
+    [launcher, 'setup', 'plan', '--profile', 'role-based-data', '--workspace', '30000', '--json'],
+    { env: { SQL_APPS_HOME: home } }));
+  assert.equal(journey.cwd, home);
+  assert.deepEqual(journey.args, ['plan', '--profile', 'role-based-data', '--workspace', '30000', '--json']);
   await writeFile(join(home, 'scripts/guide.mjs'),
     'console.log(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)}));');
   const guided = JSON.parse(await run(process.execPath, [launcher, 'guide'], { env: { SQL_APPS_HOME: home } }));
@@ -250,6 +307,23 @@ test('plugin dispatch uses checkout cwd, passes literal arguments and preserves 
   await assert.rejects(run(process.execPath, [launcher, 'guide', 'extra'], { env: { SQL_APPS_HOME: home } }), /no arguments/);
   const beforeBuild = JSON.parse(await run(process.execPath, [launcher, 'setup-check'], { env: { SQL_APPS_HOME: home } }));
   assert.deepEqual(beforeBuild.args, ['--json']);
+  await writeFile(join(home, 'scripts/local-consent.mjs'),
+    'console.log(JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)}));');
+  for (const [command, args] of [
+    ['consent-plan', ['role-based-app', 'custom-sql']],
+    ['consent-status', ['build']],
+    ['consent-grant', [briefPath]],
+    ['consent-grant-once', [briefPath]],
+    ['consent-terms', [briefPath]],
+    ['consent-revoke', ['terms']],
+    ['consent-run', ['build']],
+  ] as const) {
+    const consent = JSON.parse(await run(process.execPath, [launcher, command, ...args], { env: { SQL_APPS_HOME: home } }));
+    assert.equal(consent.cwd, home);
+    assert.deepEqual(consent.args, [command.replace('consent-', ''), ...args]);
+  }
+  await assert.rejects(run(process.execPath, [launcher, 'consent-grant', 'relative.json'], { env: { SQL_APPS_HOME: home } }), /absolute/);
+  await assert.rejects(run(process.execPath, [launcher, 'consent-plan'], { env: { SQL_APPS_HOME: home } }), /operation/);
   await assert.rejects(run(process.execPath, [launcher, 'setup-check', 'fail-sql'], { env: { SQL_APPS_HOME: home } }), /failed \(7\)/);
   await mkdir(join(home, 'dist/src'), { recursive: true });
   await writeFile(join(home, 'dist/src/local-cli.js'), 'process.exitCode=7;');

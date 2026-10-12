@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/app.js
+public/auth/redirect.js
 .sql-apps/
 .env
 .env.*
@@ -12,5 +13,6 @@ sql/bin/
 sql/obj/
 examples/**/obj/
 examples/**/bin/
-/docs/superpowers/
 /.worktrees/
+docs/superpowers/
+.superpowers/

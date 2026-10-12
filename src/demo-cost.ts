@@ -8,6 +8,7 @@ const sku = z.strictObject({
 });
 const costSchema = z.strictObject({
   version: z.literal(1), profile: z.literal('public-demo'),
+  hosting: z.enum(['container-apps', 'static-web-apps']).default('container-apps'),
   intent: z.enum(['zero-azure-spend', 'review-paid-costs']),
   acknowledgeFixedCharges: z.boolean(),
   sql: z.discriminatedUnion('mode', [
@@ -44,7 +45,7 @@ export function reviewDemoCost(input: unknown) {
     sqlMaxSizeBytes: config.sql.maxSizeBytes, sqlBackupRedundancy: config.sql.backupRedundancy,
   };
   return {
-    version: 1, profile: config.profile, intent: config.intent,
+    version: 1, profile: config.profile, hosting: config.hosting, intent: config.intent,
     review: {
       status, canProceedToWhatIf: status === 'ready-for-target-cost-review',
       nextAction: config.intent === 'zero-azure-spend' ?
@@ -62,6 +63,11 @@ export function reviewDemoCost(input: unknown) {
       { resource: 'Custom-network Container Apps managed infrastructure',
         reason: 'Managed public IP/load-balancer infrastructure can incur charges even when app replicas scale to zero.',
         pricing: 'https://learn.microsoft.com/azure/container-apps/custom-virtual-networks#managed-resources' },
+      ...(config.hosting === 'static-web-apps' ? [{
+        resource: 'Azure Static Web Apps Standard',
+        reason: 'A linked Container Apps backend requires Standard; the Container App, ACR, SQL, and networking remain.',
+        pricing: 'https://azure.microsoft.com/pricing/details/app-service/static/',
+      }] : []),
     ],
     sql: {
       parameters: sqlParameters,

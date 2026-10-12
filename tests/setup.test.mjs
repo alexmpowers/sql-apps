@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkSetup, parseArguments } from '../scripts/setup-check.mjs';
+import * as setup from '../scripts/setup-check.mjs';
 import { initializeWorkspace, runtimeFor } from '../src/workspace.mjs';
 
 function fixture(overrides = {}) {
@@ -60,6 +61,75 @@ test('role-based-data setup checks only selected service ports and remains read-
   assert.deepEqual(checked, [runtime.ports.gateway, runtime.ports.data]);
 });
 
+test('pre-build diagnostics check proposed workspace ports instead of an occupied legacy gateway', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'sql-apps-setup-ports-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checked = [];
+  const deps = fixture({ port: async port => {
+    checked.push(port);
+    return port === 18080 ? 'occupied' : 'free';
+  } });
+  const report = await checkSetup({ root, workspace: '30000' }, deps);
+  assert.deepEqual(checked, [30000, 30001, 30003, 30004, 30002]);
+  assert.equal(report.ready, true);
+  assert.equal(report.workspace.mode, 'isolated');
+  assert.deepEqual(parseArguments(['--workspace', '30000']), { workspace: '30000' });
+  checked.length = 0;
+  const legacy = await checkSetup({ root, workspace: 'legacy' }, deps);
+  assert.equal(legacy.ready, false, 'explicit legacy selection still checks its occupied gateway');
+  assert.equal(checked[0], 18080);
+});
+
+test('role-based procedure check accepts real declaration forms and ignores commented-out code', async () => {
+  const { roleBasedProcedureProblem } = await import('../src/role-based-rules.mjs');
+  const dab = { entities: {
+    A: { source: { type: 'stored-procedure', object: 'dbo.ShiftReady' } },
+    B: { source: { type: 'stored-procedure', object: 'app.SignUp' } },
+  } };
+  assert.equal(roleBasedProcedureProblem(dab, ['CREATE OR ALTER PROC [dbo].[ShiftReady] AS SELECT 1', 'create procedure app.SignUp @id int AS SELECT @id']), undefined);
+  assert.match(roleBasedProcedureProblem(dab, ['/* CREATE PROCEDURE dbo.ShiftReady */ CREATE PROCEDURE app.SignUp AS SELECT 1']), /dbo\.ShiftReady/);
+  assert.match(roleBasedProcedureProblem(dab, ['CREATE PROCEDURE dbo.ShiftReadyOld AS SELECT 1', 'CREATE PROCEDURE app.SignUp AS SELECT 1']), /dbo\.ShiftReady/,
+    'a longer procedure name must not satisfy a shorter one');
+});
+
+test('role-based-data reports its application configuration without blocking tool readiness', async () => {
+  const base = fixture();
+  const validText = '{"profile":"role-based-data","requiredRole":"Coordinator","readinessPath":"/api/Ready"}';
+  const readyDab = { entities: { Ready: { source: { type: 'stored-procedure', object: 'dbo.Ready' },
+    rest: { enabled: true, methods: ['get'] }, permissions: [{ role: 'Coordinator', actions: ['execute'] }] } } };
+  const withConfig = (text, dab = readyDab, sql = ['CREATE PROCEDURE dbo.Ready AS SELECT 1;']) => fixture({
+    read: async path => path.endsWith('role-based-data.json') ? text :
+      path.endsWith('dab-config.json') ? JSON.stringify(dab) : base.read(path),
+    sqlSources: async () => sql });
+  const missing = (await checkSetup({ profile: 'role-based-data' }, base)).checks.find(c => c.id === 'role-based-config');
+  assert.equal(missing.code, 'ROLE_BASED_CONFIG_MISSING');
+  assert.equal(missing.required, false);
+  assert.match(missing.nextAction, /role-based-data\.example\.json/);
+  const invalid = await checkSetup({ profile: 'role-based-data' }, withConfig('{"profile":"role-based-data","requiredRole":"anonymous","readinessPath":"/api/Ready"}'));
+  assert.equal(invalid.checks.find(c => c.id === 'role-based-config').code, 'ROLE_BASED_CONFIG_INVALID');
+  assert.equal(invalid.ready, true);
+  const valid = await checkSetup({ profile: 'role-based-data' }, withConfig(validText));
+  assert.equal(valid.checks.find(c => c.id === 'role-based-config').code, 'ROLE_BASED_CONFIG_READY');
+  const foundationDab = { entities: { FileJob: { source: { type: 'table', object: 'dbo.FileJobs' }, rest: true,
+    permissions: [{ role: 'processor', actions: ['read'] }] } } };
+  const dabCheck = (await checkSetup({ profile: 'role-based-data' }, withConfig(validText, foundationDab))).checks.find(c => c.id === 'role-based-config');
+  assert.equal(dabCheck.code, 'ROLE_BASED_DAB_INVALID', 'the copied foundation DAB must be caught before startup consent');
+  assert.match(dabCheck.message, /FileJob/);
+  assert.doesNotMatch(dabCheck.message, /"code"/);
+  assert.match(dabCheck.nextAction, /dab\/dab-config\.json/);
+  const unimplemented = (await checkSetup({ profile: 'role-based-data' }, withConfig(validText, readyDab, ['-- CREATE PROCEDURE dbo.Ready AS SELECT 1;'])))
+    .checks.find(c => c.id === 'role-based-config');
+  assert.equal(unimplemented.code, 'ROLE_BASED_PROCEDURE_MISSING', 'a DAB procedure absent from sql/ must be caught before SQL startup consent');
+  assert.match(unimplemented.message, /dbo\.Ready/);
+  assert.match(unimplemented.nextAction, /sql\//);
+  assert.equal((await checkSetup({}, base)).checks.some(c => c.id === 'role-based-config'), false);
+  const actions = (await checkSetup({}, fixture({ exists: async () => false }))).checks
+    .filter(c => ['dependencies', 'build'].includes(c.id)).map(c => c.nextAction).join(' ');
+  assert.doesNotMatch(actions, /run npm (ci|run build)/, 'raw restore/build advice bypasses the guarded consent-run path');
+  assert.match(actions, /consent-run restore/);
+  assert.match(actions, /consent-run build/);
+});
+
 test('missing prerequisites, engine modes and malformed results fail safely without raw secrets', async () => {
   for (const [command, code] of [['npm', 'NPM_UNAVAILABLE'], ['dotnet', 'SDK_UNAVAILABLE'], ['docker', 'DOCKER_UNAVAILABLE']]) {
     const deps = fixture();
@@ -93,6 +163,108 @@ test('unsupported Node, runtime-only SDK and global.json incompatibility are exp
   assert.ok((await checkSetup({}, deps)).checks.some(c => c.code === 'SDK_SELECTION_FAILED'));
 });
 
+test('missing tools and installed-but-failing probes have different installation states', async () => {
+  for (const [error, state] of [
+    [Object.assign(new Error('absent'), { code: 'ENOENT' }), 'missing'],
+    [Object.assign(new Error('private diagnostic'), { code: 7 }), 'check-failed'],
+    [Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }), 'check-failed'],
+  ]) {
+    const deps = fixture();
+    const run = deps.run;
+    deps.run = (command, args) => command === 'npm' ? Promise.reject(error) : run(command, args);
+    const report = await checkSetup({}, deps);
+    assert.equal(report.checks.find(check => check.id === 'npm').toolState, state);
+    assert.equal(JSON.stringify(report).includes('private diagnostic'), false);
+  }
+});
+
+test('unsupported Node and unresolved SDK selection are not missing installations', async () => {
+  const deps = fixture({ nodeVersion: '23.0.0' });
+  const run = deps.run;
+  deps.run = (command, args) => command === 'dotnet' && args[0] === '--version' ?
+    Promise.reject(Object.assign(new Error('selection failed'), { code: 1 })) : run(command, args);
+  const report = await checkSetup({}, deps);
+  assert.equal(report.checks.find(check => check.id === 'node').toolState, 'unsupported');
+  assert.equal(report.checks.find(check => check.id === 'dotnet').toolState, 'check-failed');
+});
+
+test('dependency readiness validates all locked packages and the actual SQL tool', async t => {
+  assert.equal(typeof setup.inspectDependencies, 'function');
+  const home = await mkdtemp(join(tmpdir(), 'sql-apps-dependencies-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(join(home, 'node_modules', 'fixture'), { recursive: true });
+  await mkdir(join(home, '.config'));
+  await writeFile(join(home, 'package.json'), JSON.stringify({ dependencies: { fixture: '1.0.0' } }));
+  await writeFile(join(home, 'package-lock.json'), JSON.stringify({
+    lockfileVersion: 3, packages: { '': { dependencies: { fixture: '1.0.0' } },
+      'node_modules/fixture': { version: '1.0.0' } },
+  }));
+  await writeFile(join(home, 'node_modules', 'fixture', 'package.json'),
+    '{"name":"fixture","version":"1.0.0","main":"index.js"}');
+  await writeFile(join(home, 'node_modules', 'fixture', 'index.js'), 'module.exports = {};');
+  await writeFile(join(home, '.config', 'dotnet-tools.json'), JSON.stringify({
+    tools: { 'microsoft.sqlpackage': { version: '170.5.96', commands: ['sqlpackage'] } },
+  }));
+  const probe = async (command, args) => {
+    if (command === 'npm') {
+      assert.deepEqual(args, ['ls', '--all', '--json', '--offline']);
+      return '{"dependencies":{"fixture":{"version":"1.0.0"}}}';
+    }
+    assert.equal(command, 'dotnet');
+    assert.deepEqual(args, ['tool', 'run', 'sqlpackage', '--', '/Version']);
+    return '170.5.96.0';
+  };
+  assert.equal((await setup.inspectDependencies(home, probe)).ready, true);
+  const brokenTree = await setup.inspectDependencies(home, async (command, args) => {
+    if (command === 'npm') throw Object.assign(new Error('missing transitive package'), { code: 1 });
+    return probe(command, args);
+  });
+  assert.equal(brokenTree.npmReady, false);
+  assert.equal(brokenTree.checks.find(check => check.id === 'npm-tree').code, 'NPM_TREE_UNVERIFIED');
+  assert.equal((await setup.inspectDependencies(home, async () => '169.0.0')).sqlToolsReady, false);
+  await unlink(join(home, 'node_modules', 'fixture', 'index.js'));
+  assert.equal((await setup.inspectDependencies(home, probe)).npmReady, false);
+  await writeFile(join(home, 'node_modules', 'fixture', 'index.js'), 'module.exports = {};');
+  await writeFile(join(home, 'node_modules', 'fixture', 'package.json'), '{"name":"fixture","version":"2.0.0","main":"index.js"}');
+  assert.equal((await setup.inspectDependencies(home, probe)).npmReady, false);
+});
+
+test('slow cold dependency probes are retried and never reported as missing dependencies', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'sql-apps-dependency-timeout-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(join(home, 'node_modules', 'fixture'), { recursive: true });
+  await mkdir(join(home, '.config'));
+  await writeFile(join(home, 'package.json'), JSON.stringify({ dependencies: { fixture: '1.0.0' } }));
+  await writeFile(join(home, 'package-lock.json'), JSON.stringify({
+    lockfileVersion: 3, packages: { '': { dependencies: { fixture: '1.0.0' } }, 'node_modules/fixture': { version: '1.0.0' } },
+  }));
+  await writeFile(join(home, 'node_modules', 'fixture', 'package.json'), '{"name":"fixture","version":"1.0.0","main":"index.js"}');
+  await writeFile(join(home, 'node_modules', 'fixture', 'index.js'), 'module.exports = {};');
+  await writeFile(join(home, '.config', 'dotnet-tools.json'), JSON.stringify({
+    tools: { 'microsoft.sqlpackage': { version: '170.5.96', commands: ['sqlpackage'] } },
+  }));
+  const timeout = () => Object.assign(new Error('Command timed out'), { killed: true, signal: 'SIGTERM' });
+  const calls = { npm: 0, dotnet: 0 };
+  const coldOnce = async command => {
+    if (calls[command]++ === 0) throw timeout();
+    return command === 'npm' ? '{"dependencies":{"fixture":{"version":"1.0.0"}}}' : '170.5.96.0';
+  };
+  const warm = await setup.inspectDependencies(home, coldOnce);
+  assert.equal(warm.ready, true);
+  assert.deepEqual(calls, { npm: 2, dotnet: 2 });
+
+  const stalled = await setup.inspectDependencies(home, async () => { throw timeout(); });
+  assert.equal(stalled.ready, false);
+  assert.equal(stalled.probeTimedOut, true);
+  assert.equal(stalled.checks.find(check => check.id === 'npm-tree').code, 'NPM_TREE_PROBE_TIMEOUT');
+  assert.equal(stalled.checks.find(check => check.id === 'microsoft.sqlpackage').code, 'SQL_TOOL_PROBE_TIMEOUT');
+  assert.match(stalled.checks.find(check => check.id === 'npm-tree').nextAction, /not evidence|rerun/i);
+
+  const broken = await setup.inspectDependencies(home, async () => { throw Object.assign(new Error('exit 1'), { code: 1 }); });
+  assert.equal(broken.probeTimedOut, false);
+  assert.equal(broken.checks.find(check => check.id === 'npm-tree').code, 'NPM_TREE_UNVERIFIED');
+});
+
 test('SQL cache, preview access, ARM and selected-container states are not confused with verified SQL', async () => {
   const deps = fixture({ architecture: 'arm64' });
   const run = deps.run;
@@ -112,22 +284,38 @@ test('SQL cache, preview access, ARM and selected-container states are not confu
   await assert.rejects(checkSetup({ container: 'bad;name' }, deps), /container name/);
 });
 
-test('port conflicts never authorize killing services; healthy gateway alone is not proof of ownership', async () => {
-  const deps = fixture({ port: async port => port === 18080 ? 'occupied' : 'free' });
-  let report = await checkSetup({}, deps);
-  assert.equal(report.ready, false);
-  assert.ok(report.checks.some(c => c.code === 'EXISTING_GATEWAY_CHECK_OWNERSHIP'));
-  const run = deps.run;
-  deps.port = async () => 'occupied';
-  deps.run = (cmd, args) => args[0] === 'ps' ? Promise.resolve(
-    '{"owner":"data","ports":"127.0.0.1:15000->5000/tcp"}\n' +
-    '{"owner":"storage","ports":"127.0.0.1:10000->10000/tcp, 127.0.0.1:10001->10001/tcp"}\n' +
-    '{"owner":"functions","ports":"127.0.0.1:17071->80/tcp"}') : run(cmd, args);
-  report = await checkSetup({}, deps);
-  assert.ok(report.checks.filter(c => c.code === 'OWNED_SERVICE_RUNNING').length === 4);
-  deps.port = async () => 'unknown';
-  assert.equal((await checkSetup({}, deps)).ready, false);
-});
+for (const selection of [undefined, 'legacy', 33000]) {
+  const mode = selection === undefined ? 'legacy-unselected' : selection === 'legacy' ? 'legacy' : 'isolated';
+  test(`port conflicts never authorize killing services; healthy gateway alone is not proof of ownership (${mode})`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'sql-apps-setup-conflicts-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    if (selection !== undefined) await initializeWorkspace(root, selection, async () => 'free');
+    const runtime = runtimeFor(undefined, root);
+    const deps = fixture({ port: async port => port === runtime.ports.gateway ? 'occupied' : 'free' });
+    let report = await checkSetup({ root }, deps);
+    assert.equal(report.ready, false);
+    assert.ok(report.checks.some(c => c.code === 'EXISTING_GATEWAY_CHECK_OWNERSHIP'));
+    const run = deps.run;
+    deps.port = async () => 'occupied';
+    const containers = [
+      { owner: 'data', workspace: runtime.id, ports: `127.0.0.1:${runtime.ports.data}->5000/tcp` },
+      { owner: 'storage', workspace: runtime.id,
+        ports: `127.0.0.1:${runtime.ports.blob}->10000/tcp, 127.0.0.1:${runtime.ports.queue}->10001/tcp` },
+      { owner: 'functions', workspace: runtime.id, ports: `127.0.0.1:${runtime.ports.functions}->80/tcp` },
+    ];
+    deps.run = (cmd, args) => {
+      if (args[0] !== 'ps') return run(cmd, args);
+      deps.calls.push([cmd, ...args]);
+      return Promise.resolve(containers.map(container => JSON.stringify(container)).join('\n'));
+    };
+    report = await checkSetup({ root }, deps);
+    assert.equal(report.checks.filter(c => c.code === 'OWNED_SERVICE_RUNNING').length, 4);
+    assert.equal(report.ready, false, 'Owned dependencies do not prove gateway ownership');
+    deps.port = async () => 'unknown';
+    assert.equal((await checkSetup({ root }, deps)).ready, false);
+    assert.ok(deps.calls.every(call => !call.some(value => ['pull', 'run', 'login', 'start', 'stop', 'rm'].includes(value))));
+  });
+}
 
 test('configured setup diagnostics use derived ports and reject another workspace label', async t => {
   const root = await mkdtemp(join(tmpdir(), 'sql-apps-setup-isolated-'));
